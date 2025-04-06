@@ -18,14 +18,14 @@ use super::{
 };
 
 struct WorkerStreamState {
-    disable_flume: bool,
+    disable_actor: bool,
     next: PollNext,
 }
 
 impl Default for WorkerStreamState {
     fn default() -> Self {
         Self {
-            disable_flume: false,
+            disable_actor: false,
             next: PollNext::default(),
         }
     }
@@ -38,7 +38,7 @@ pub(crate) enum WorkerMessage {
     },
     RegisterResource {
         fd: OwnedFd,
-        ops: Arc<Operations<[Operation]>>,
+        ops: Arc<Operations>,
         complete: RegisterResourceSender,
     },
     CloseResource {
@@ -71,7 +71,7 @@ impl UringRuntimeWorker {
             }),
             self.rt.map(Ok),
             |x: &mut WorkerStreamState| {
-                if x.disable_flume {
+                if x.disable_actor {
                     PollNext::Left
                 } else {
                     x.next.toggle()
@@ -92,7 +92,7 @@ impl UringRuntimeWorker {
                             op.wake(event.result());
                         }
                     } else {
-                        println!("dropped {:?}", info);
+                        panic!("dropped {:?}", info);
                     }
 
                     if let Some(PendingResize {
@@ -115,7 +115,7 @@ impl UringRuntimeWorker {
                             }
                         }
 
-                        combined.get_state_mut().disable_flume = false;
+                        combined.get_state_mut().disable_actor = false;
                         ops_disabled.set(false);
                         println!("ops reenabled");
                     }
@@ -133,7 +133,7 @@ impl UringRuntimeWorker {
                                 complete,
                                 new_size,
                             });
-                            combined.get_state_mut().disable_flume = true;
+                            combined.get_state_mut().disable_actor = true;
                             ops_disabled.set(true);
                             println!("ops disabled");
 

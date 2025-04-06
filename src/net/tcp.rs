@@ -52,11 +52,10 @@ impl TcpStream {
         })
     }
 
-    pub async fn read(&self, buf: &mut [u8]) -> Result<usize> {
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let Some(rt) = self.rt.load() else {
             return Err(Error::NoRuntime);
         };
-        let ops = self.resource.ops().await;
 
         let entry = opcode::Recv::new(Fixed(self.resource.id), buf.as_mut_ptr(), buf.len() as u32)
             .build()
@@ -68,16 +67,16 @@ impl TcpStream {
                 .into(),
             );
 
+        let ops = self.resource.ops().await;
         let amt = unsafe { ops.submit(Self::READ_OP_ID, rt, entry) }.await?;
 
         Ok(amt as usize)
     }
 
-    pub async fn write(&self, buf: &[u8]) -> Result<usize> {
+    pub async fn write(&mut self, buf: &[u8]) -> Result<usize> {
         let Some(rt) = self.rt.load() else {
             return Err(Error::NoRuntime);
         };
-        let ops = self.resource.ops().await;
 
         let entry = opcode::Send::new(Fixed(self.resource.id), buf.as_ptr(), buf.len() as u32)
             .build()
@@ -89,6 +88,7 @@ impl TcpStream {
                 .into(),
             );
 
+        let ops = self.resource.ops().await;
         let amt = unsafe { ops.submit(Self::WRITE_OP_ID, rt, entry) }.await?;
 
         Ok(amt as usize)

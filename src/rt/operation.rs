@@ -7,9 +7,11 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll, Waker},
+    usize,
 };
 
-use async_event::Event;
+use event_listener::{Event, EventListener};
+use futures::FutureExt;
 use io_uring::squeue;
 
 use crate::Result;
@@ -43,11 +45,11 @@ impl From<u64> for EventData {
     }
 }
 
-pub(super) struct OpsDisabled {
+struct OpsDisabledData {
     disabled: AtomicBool,
     waker: Event,
 }
-impl OpsDisabled {
+impl OpsDisabledData {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             disabled: AtomicBool::new(false),
@@ -58,14 +60,98 @@ impl OpsDisabled {
     pub fn set(&self, disabled: bool) {
         self.disabled.store(disabled, Ordering::Relaxed);
         if !disabled {
-            self.waker.notify_all();
+            self.waker.notify_additional(usize::MAX);
+        }
+    }
+}
+
+enum OpsDisabledState {
+    Disarmed,
+    Arming(EventListener),
+    Armed,
+}
+
+impl OpsDisabledState {
+    #[inline(always)]
+    fn disarm(&mut self) {
+        debug_assert!(matches!(self, Self::Armed));
+        *self = Self::Disarmed;
+    }
+
+    #[inline(always)]
+    fn poll_arm(&mut self, data: &OpsDisabledData, cx: &mut Context) -> Poll<()> {
+        macro_rules! try_arm {
+            () => {
+                if data.disabled.load(Ordering::Relaxed) {
+                    Poll::Pending
+                } else {
+                    *self = Self::Armed;
+                    Poll::Ready(())
+                }
+            };
+        }
+
+        match self {
+            Self::Armed => Poll::Ready(()),
+            Self::Disarmed => {
+                if data.disabled.load(Ordering::Relaxed) {
+                    *self = Self::Arming(data.waker.listen());
+                    try_arm!()
+                } else {
+                    *self = Self::Armed;
+                    Poll::Ready(())
+                }
+            }
+            Self::Arming(ev) => match ev.poll_unpin(cx) {
+                Poll::Ready(()) => {
+                    if data.disabled.load(Ordering::Relaxed) {
+                        *self = Self::Arming(data.waker.listen());
+                        try_arm!()
+                    } else {
+                        *self = Self::Armed;
+                        Poll::Ready(())
+                    }
+                }
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+}
+
+pub(crate) struct OpsDisabled {
+    handle: Arc<OpsDisabledData>,
+    state: OpsDisabledState,
+}
+
+impl Clone for OpsDisabled {
+    fn clone(&self) -> Self {
+        Self {
+            handle: self.handle.clone(),
+            state: OpsDisabledState::Disarmed,
+        }
+    }
+}
+
+impl OpsDisabled {
+    pub fn new() -> Self {
+        Self {
+            handle: OpsDisabledData::new(),
+            state: OpsDisabledState::Disarmed,
         }
     }
 
-    pub async fn wait(&self) {
-        self.waker
-            .wait_until(|| (!self.disabled.load(Ordering::Relaxed)).then_some(()))
-            .await;
+    pub fn set(&self, disabled: bool) {
+        self.handle.set(disabled);
+    }
+
+    #[inline(always)]
+    pub fn poll_arm(&mut self, cx: &mut Context) -> Poll<()> {
+        self.state.poll_arm(&self.handle, cx)
+    }
+
+    #[inline(always)]
+    pub fn disarm(&mut self) {
+        self.state.disarm();
     }
 }
 
@@ -135,6 +221,7 @@ impl Operation {
         }
     }
 
+    #[inline(always)]
     pub fn register(&self, cx: &mut Context<'_>) {
         debug_assert!(matches!(self.state(), OperationState::Finished(_)));
         self.state
@@ -143,6 +230,7 @@ impl Operation {
         unsafe { &mut *self.waker.get() }.clone_from(cx.waker());
     }
 
+    #[inline(always)]
     pub fn wake(&self, val: i32) {
         let state: OperationState = self
             .state
@@ -162,12 +250,13 @@ impl Operation {
         drop(cancel);
     }
 
+    #[inline(always)]
     pub fn state(&self) -> OperationState {
         self.state.load(Ordering::Acquire).into()
     }
 }
 
-pub(crate) struct Operations<Ops: ?Sized> {
+pub(crate) struct Operations<Ops: ?Sized = [Operation]> {
     ops: Ops,
 }
 
@@ -213,6 +302,7 @@ pub(crate) struct SubmitOperation<'a> {
 impl<'a> Future for SubmitOperation<'a> {
     type Output = Result<i32>;
 
+    #[inline(always)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(entry) = self.entry.take() {
             self.op.register(cx);
