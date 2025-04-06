@@ -27,4 +27,4 @@ required-features = ["tokio"]
 
 [profile.release]
 debug = true
-lto = true
+lto = "fat"

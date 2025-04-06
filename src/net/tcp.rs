@@ -1,4 +1,4 @@
-use std::{array, os::fd::OwnedFd, sync::Arc, task::Waker};
+use std::{os::fd::OwnedFd, sync::Arc, task::Waker};
 
 use futures::channel::oneshot;
 use io_uring::{opcode, types::Fixed};
@@ -8,7 +8,7 @@ use crate::{
     rt::{
         UringDataHandle,
         inner::{RuntimeWorkerChannel, WorkerMessage},
-        operation::{EventData, Operation, Operations},
+        operation::{EventData, Operations},
         resource::Resource,
     },
 };
@@ -33,9 +33,7 @@ impl TcpStream {
 
         let (tx, rx) = oneshot::channel();
 
-        let ops = Arc::new(Operations::new(array::from_fn::<_, 4, _>(|_| {
-            Operation::new()
-        })));
+        let ops = Arc::new(Operations::new_from_size());
 
         sender.send(WorkerMessage::RegisterResource {
             ops,
@@ -68,7 +66,7 @@ impl TcpStream {
             );
 
         let ops = self.resource.ops().await;
-        let amt = unsafe { ops.submit(Self::READ_OP_ID, rt, entry) }.await?;
+        let amt = unsafe { ops.submit::<{ Self::READ_OP_ID }>(rt, entry) }.await?;
 
         Ok(amt as usize)
     }
@@ -89,7 +87,7 @@ impl TcpStream {
             );
 
         let ops = self.resource.ops().await;
-        let amt = unsafe { ops.submit(Self::WRITE_OP_ID, rt, entry) }.await?;
+        let amt = unsafe { ops.submit::<{ Self::WRITE_OP_ID }>(rt, entry) }.await?;
 
         Ok(amt as usize)
     }

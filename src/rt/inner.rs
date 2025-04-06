@@ -10,7 +10,7 @@ use super::{
     channel::{ChannelRecv, ChannelSend},
     completion::CqueueStream,
     deps::AsyncFd,
-    operation::{EventData, Operation, Operations, OpsDisabled},
+    operation::{EventData, Operations, OpsDisabled},
     resource::{
         PendingResize, RegisterResourceSender, Resource, WorkerResource, WorkerResourceSlab,
     },

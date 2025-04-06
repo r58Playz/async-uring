@@ -256,25 +256,34 @@ impl Operation {
     }
 }
 
-pub(crate) struct Operations<Ops: ?Sized = [Operation]> {
-    ops: Ops,
+// funny hack to workaround no const generic expressions on stable
+struct AssertOperationBounds<const ID: u32, const SIZE: usize>;
+impl<const ID: u32, const SIZE: usize> AssertOperationBounds<ID, SIZE> {
+    const OK: () = assert!((ID as usize) < SIZE, "operation out of bounds");
 }
 
-impl<Ops> Operations<Ops> {
-    pub fn new(ops: Ops) -> Self {
+pub(crate) struct Operations<const SIZE: usize = 4> {
+    ops: [Operation; SIZE],
+}
+
+impl<const SIZE: usize> Operations<SIZE> {
+    pub fn new(ops: [Operation; SIZE]) -> Self {
         Self { ops }
     }
-}
 
-impl Operations<[Operation]> {
-    pub unsafe fn submit<'a>(
+    pub fn new_from_size() -> Self {
+        Operations::new(std::array::from_fn::<_, SIZE, _>(|_| Operation::new()))
+    }
+
+    pub unsafe fn submit<'a, const ID: u32>(
         &'a self,
-        id: u32,
         rt: &'a UringData,
         entry: squeue::Entry,
     ) -> SubmitOperation<'a> {
+        let () = AssertOperationBounds::<ID, SIZE>::OK;
+
         SubmitOperation {
-            op: &self.ops[id as usize],
+            op: &self.ops[ID as usize],
             rt,
             entry: Some(entry),
         }
