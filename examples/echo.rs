@@ -5,33 +5,33 @@ use tokio::{net::TcpListener, task::coop::unconstrained};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let (rt, fut) = UringRuntime::builder::<TokioAsyncFd>().build()?;
+	let (rt, fut) = UringRuntime::builder::<TokioAsyncFd>().build()?;
 
-    tokio::spawn(unconstrained(fut));
+	tokio::spawn(unconstrained(fut));
 
-    let listener = TcpListener::bind(args().nth(1).unwrap()).await?;
+	let listener = TcpListener::bind(args().nth(1).unwrap()).await?;
 
-    println!("listening");
+	println!("listening");
 
-    while let Ok((stream, addr)) = listener.accept().await {
-        let stream = rt.register_tcp(stream.into_std()?).await?;
-        println!("accepted {:?}", addr);
-        tokio::spawn(handle(stream));
-    }
+	while let Ok((stream, addr)) = listener.accept().await {
+		let stream = rt.register_tcp(stream.into_std()?).await?;
+		println!("accepted {:?}", addr);
+		tokio::spawn(handle(stream));
+	}
 
-    Ok(())
+	Ok(())
 }
 
 async fn handle(mut stream: TcpStream) -> Result<()> {
-    let mut buf = vec![0u8; 16 * 1024];
+	let mut buf = vec![0u8; 16 * 1024];
 
-    loop {
-        let cnt = stream.read(&mut buf).await?;
+	loop {
+		let cnt = stream.read(&mut buf).await?;
 
-        if cnt == 0 {
-            break Ok(());
-        }
+		if cnt == 0 {
+			break Ok(());
+		}
 
-        stream.write(&buf[0..cnt]).await?;
-    }
+		stream.write(&buf[0..cnt]).await?;
+	}
 }

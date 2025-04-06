@@ -1,13 +1,12 @@
 use std::{
-    cell::UnsafeCell,
-    io,
-    pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    task::{Context, Poll, Waker},
-    usize,
+	cell::UnsafeCell,
+	io,
+	pin::Pin,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, AtomicU64, Ordering},
+	},
+	task::{Context, Poll, Waker},
 };
 
 use event_listener::{Event, EventListener};
@@ -20,313 +19,323 @@ use super::UringData;
 
 #[derive(Debug)]
 pub(crate) struct EventData {
-    pub resource: u32,
-    pub id: u32,
+	pub resource: u32,
+	pub id: u32,
 }
 
 impl From<EventData> for u64 {
-    fn from(value: EventData) -> Self {
-        let EventData {
-            resource: top,
-            id: bottom,
-        } = value;
+	fn from(value: EventData) -> Self {
+		let EventData {
+			resource: top,
+			id: bottom,
+		} = value;
 
-        ((top as u64) << 32) | bottom as u64
-    }
+		(u64::from(top) << 32) | u64::from(bottom)
+	}
 }
 
 impl From<u64> for EventData {
-    fn from(value: u64) -> Self {
-        let (top, bottom) = ((value >> 32) as u32, value as u32);
-        Self {
-            resource: top,
-            id: bottom,
-        }
-    }
+	fn from(value: u64) -> Self {
+		// this is 2 u32s packed into 1 u64
+		#[expect(clippy::cast_possible_truncation)]
+		let (top, bottom) = ((value >> 32) as u32, value as u32);
+
+		Self {
+			resource: top,
+			id: bottom,
+		}
+	}
 }
 
 struct OpsDisabledData {
-    disabled: AtomicBool,
-    waker: Event,
+	disabled: AtomicBool,
+	waker: Event,
 }
 impl OpsDisabledData {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            disabled: AtomicBool::new(false),
-            waker: Event::new(),
-        })
-    }
+	pub fn new() -> Arc<Self> {
+		Arc::new(Self {
+			disabled: AtomicBool::new(false),
+			waker: Event::new(),
+		})
+	}
 
-    pub fn set(&self, disabled: bool) {
-        self.disabled.store(disabled, Ordering::Relaxed);
-        if !disabled {
-            self.waker.notify_additional(usize::MAX);
-        }
-    }
+	pub fn set(&self, disabled: bool) {
+		self.disabled.store(disabled, Ordering::Relaxed);
+		if !disabled {
+			self.waker.notify_additional(usize::MAX);
+		}
+	}
 }
 
 enum OpsDisabledState {
-    Disarmed,
-    Arming(EventListener),
-    Armed,
+	Disarmed,
+	Arming(EventListener),
+	Armed,
 }
 
 impl OpsDisabledState {
-    #[inline(always)]
-    fn disarm(&mut self) {
-        debug_assert!(matches!(self, Self::Armed));
-        *self = Self::Disarmed;
-    }
+	#[inline(always)]
+	fn disarm(&mut self) {
+		debug_assert!(matches!(self, Self::Armed));
+		*self = Self::Disarmed;
+	}
 
-    #[inline(always)]
-    fn poll_arm(&mut self, data: &OpsDisabledData, cx: &mut Context) -> Poll<()> {
-        macro_rules! try_arm {
-            () => {
-                if data.disabled.load(Ordering::Relaxed) {
-                    Poll::Pending
-                } else {
-                    *self = Self::Armed;
-                    Poll::Ready(())
-                }
-            };
-        }
+	#[inline(always)]
+	fn poll_arm(&mut self, data: &OpsDisabledData, cx: &mut Context) -> Poll<()> {
+		macro_rules! try_arm {
+			() => {
+				if data.disabled.load(Ordering::Relaxed) {
+					Poll::Pending
+				} else {
+					*self = Self::Armed;
+					Poll::Ready(())
+				}
+			};
+		}
 
-        match self {
-            Self::Armed => Poll::Ready(()),
-            Self::Disarmed => {
-                if data.disabled.load(Ordering::Relaxed) {
-                    *self = Self::Arming(data.waker.listen());
-                    try_arm!()
-                } else {
-                    *self = Self::Armed;
-                    Poll::Ready(())
-                }
-            }
-            Self::Arming(ev) => match ev.poll_unpin(cx) {
-                Poll::Ready(()) => {
-                    if data.disabled.load(Ordering::Relaxed) {
-                        *self = Self::Arming(data.waker.listen());
-                        try_arm!()
-                    } else {
-                        *self = Self::Armed;
-                        Poll::Ready(())
-                    }
-                }
-                Poll::Pending => Poll::Pending,
-            },
-        }
-    }
+		match self {
+			Self::Armed => Poll::Ready(()),
+			Self::Disarmed => {
+				if data.disabled.load(Ordering::Relaxed) {
+					*self = Self::Arming(data.waker.listen());
+					try_arm!()
+				} else {
+					*self = Self::Armed;
+					Poll::Ready(())
+				}
+			}
+			Self::Arming(ev) => match ev.poll_unpin(cx) {
+				Poll::Ready(()) => {
+					if data.disabled.load(Ordering::Relaxed) {
+						*self = Self::Arming(data.waker.listen());
+						try_arm!()
+					} else {
+						*self = Self::Armed;
+						Poll::Ready(())
+					}
+				}
+				Poll::Pending => Poll::Pending,
+			},
+		}
+	}
 }
 
 pub(crate) struct OpsDisabled {
-    handle: Arc<OpsDisabledData>,
-    state: OpsDisabledState,
+	handle: Arc<OpsDisabledData>,
+	state: OpsDisabledState,
 }
 
 impl Clone for OpsDisabled {
-    fn clone(&self) -> Self {
-        Self {
-            handle: self.handle.clone(),
-            state: OpsDisabledState::Disarmed,
-        }
-    }
+	fn clone(&self) -> Self {
+		Self {
+			handle: self.handle.clone(),
+			state: OpsDisabledState::Disarmed,
+		}
+	}
 }
 
 impl OpsDisabled {
-    pub fn new() -> Self {
-        Self {
-            handle: OpsDisabledData::new(),
-            state: OpsDisabledState::Disarmed,
-        }
-    }
+	pub fn new() -> Self {
+		Self {
+			handle: OpsDisabledData::new(),
+			state: OpsDisabledState::Disarmed,
+		}
+	}
 
-    pub fn set(&self, disabled: bool) {
-        self.handle.set(disabled);
-    }
+	pub fn set(&self, disabled: bool) {
+		self.handle.set(disabled);
+	}
 
-    #[inline(always)]
-    pub fn poll_arm(&mut self, cx: &mut Context) -> Poll<()> {
-        self.state.poll_arm(&self.handle, cx)
-    }
+	#[inline(always)]
+	pub fn poll_arm(&mut self, cx: &mut Context) -> Poll<()> {
+		self.state.poll_arm(&self.handle, cx)
+	}
 
-    #[inline(always)]
-    pub fn disarm(&mut self) {
-        self.state.disarm();
-    }
+	#[inline(always)]
+	pub fn disarm(&mut self) {
+		self.state.disarm();
+	}
 }
 
 #[derive(Debug)]
 #[repr(align(8))]
 pub(crate) struct OperationCancelData {
-    wake: bool,
+	wake: bool,
 }
 
 #[derive(Debug)]
 pub(crate) enum OperationState {
-    // only the op task can access waker here
-    Waiting,
-    // only happens if an op gets dropped while waiting. only op task can access waker
-    Cancelled(Box<OperationCancelData>),
-    // only the worker task can access waker here
-    Finished(i32),
+	// only the op task can access waker here
+	Waiting,
+	// only happens if an op gets dropped while waiting. only op task can access waker
+	Cancelled(Box<OperationCancelData>),
+	// only the worker task can access waker here
+	Finished(i32),
 }
 
 impl OperationState {
-    pub fn cancel_data(self) -> Option<Box<OperationCancelData>> {
-        match self {
-            Self::Cancelled(x) => Some(x),
-            Self::Waiting | Self::Finished(_) => None,
-        }
-    }
+	pub fn cancel_data(self) -> Option<Box<OperationCancelData>> {
+		match self {
+			Self::Cancelled(x) => Some(x),
+			Self::Waiting | Self::Finished(_) => None,
+		}
+	}
 }
 
 impl From<u64> for OperationState {
-    fn from(value: u64) -> Self {
-        let (data, tag) = (value & !0b111, value & 0b111);
-        match tag {
-            1 => Self::Waiting,
-            2 => Self::Finished((data >> 3) as i32),
-            3 => Self::Cancelled(unsafe {
-                Box::from_raw(std::ptr::null_mut::<OperationCancelData>().with_addr(data as usize))
-            }),
-            _ => unreachable!("{value:08X}"),
-        }
-    }
+	fn from(value: u64) -> Self {
+		let (data, tag) = (value & !0b111, value & 0b111);
+		match tag {
+			1 => Self::Waiting,
+			// data is only ever an i32
+			#[expect(clippy::cast_possible_truncation)]
+			2 => Self::Finished((data >> 3) as i32),
+			// data is only ever an 8 byte aligned pointer
+			#[expect(clippy::cast_possible_truncation)]
+			3 => Self::Cancelled(unsafe {
+				Box::from_raw(std::ptr::null_mut::<OperationCancelData>().with_addr(data as usize))
+			}),
+			_ => unreachable!("{value:08X}"),
+		}
+	}
 }
 impl From<OperationState> for u64 {
-    fn from(value: OperationState) -> Self {
-        let (ptr, tag) = match value {
-            OperationState::Waiting => (0, 1),
-            OperationState::Finished(val) => ((val as u64) << 3, 2),
-            OperationState::Cancelled(cleanup) => (Box::into_raw(cleanup).addr() as u64, 3),
-        };
+	fn from(value: OperationState) -> Self {
+		let (ptr, tag) = match value {
+			OperationState::Waiting => (0, 1u64),
+			// casted value is immediately casted back to i32
+			#[expect(clippy::cast_sign_loss)]
+			OperationState::Finished(val) => ((val as u64) << 3, 2u64),
+			OperationState::Cancelled(cleanup) => (Box::into_raw(cleanup).addr() as u64, 3u64),
+		};
 
-        ptr | ((tag as u64) & 0b111)
-    }
+		debug_assert_eq!(tag & !0b111, 0);
+
+		ptr | (tag & 0b111)
+	}
 }
 
 pub(crate) struct Operation {
-    state: AtomicU64,
-    waker: UnsafeCell<Waker>,
+	state: AtomicU64,
+	waker: UnsafeCell<Waker>,
 }
 
 unsafe impl Sync for Operation {}
 unsafe impl Send for Operation {}
 
 impl Operation {
-    pub fn new() -> Self {
-        Self {
-            state: AtomicU64::new(OperationState::Finished(0).into()),
-            waker: UnsafeCell::new(Waker::noop().clone()),
-        }
-    }
+	pub fn new() -> Self {
+		Self {
+			state: AtomicU64::new(OperationState::Finished(0).into()),
+			waker: UnsafeCell::new(Waker::noop().clone()),
+		}
+	}
 
-    #[inline(always)]
-    pub fn register(&self, cx: &mut Context<'_>) {
-        debug_assert!(matches!(self.state(), OperationState::Finished(_)));
-        self.state
-            .store(OperationState::Waiting.into(), Ordering::Release);
+	#[inline(always)]
+	pub fn register(&self, cx: &mut Context<'_>) {
+		debug_assert!(matches!(self.state(), OperationState::Finished(_)));
+		self.state
+			.store(OperationState::Waiting.into(), Ordering::Release);
 
-        unsafe { &mut *self.waker.get() }.clone_from(cx.waker());
-    }
+		unsafe { &mut *self.waker.get() }.clone_from(cx.waker());
+	}
 
-    #[inline(always)]
-    pub fn wake(&self, val: i32) {
-        let state: OperationState = self
-            .state
-            .swap(OperationState::Finished(val).into(), Ordering::Release)
-            .into();
-        debug_assert!(matches!(
-            state,
-            OperationState::Waiting | OperationState::Cancelled(_)
-        ));
-        let cancel = state.cancel_data();
+	#[inline(always)]
+	pub fn wake(&self, val: i32) {
+		let state: OperationState = self
+			.state
+			.swap(OperationState::Finished(val).into(), Ordering::Release)
+			.into();
+		debug_assert!(matches!(
+			state,
+			OperationState::Waiting | OperationState::Cancelled(_)
+		));
+		let cancel = state.cancel_data();
 
-        if cancel.as_ref().is_none_or(|x| x.wake) {
-            unsafe { &mut *self.waker.get() }.wake_by_ref();
-        }
+		if cancel.as_ref().is_none_or(|x| x.wake) {
+			unsafe { &mut *self.waker.get() }.wake_by_ref();
+		}
 
-        // drop anything that was needed for the op to complete safely
-        drop(cancel);
-    }
+		// drop anything that was needed for the op to complete safely
+		drop(cancel);
+	}
 
-    #[inline(always)]
-    pub fn state(&self) -> OperationState {
-        self.state.load(Ordering::Acquire).into()
-    }
+	#[inline(always)]
+	pub fn state(&self) -> OperationState {
+		self.state.load(Ordering::Acquire).into()
+	}
 }
 
 // funny hack to workaround no const generic expressions on stable
 struct AssertOperationBounds<const ID: u32, const SIZE: usize>;
 impl<const ID: u32, const SIZE: usize> AssertOperationBounds<ID, SIZE> {
-    const OK: () = assert!((ID as usize) < SIZE, "operation out of bounds");
+	const OK: () = assert!((ID as usize) < SIZE, "operation out of bounds");
 }
 
 pub(crate) struct Operations<const SIZE: usize = 4> {
-    ops: [Operation; SIZE],
+	ops: [Operation; SIZE],
 }
 
 impl<const SIZE: usize> Operations<SIZE> {
-    pub fn new(ops: [Operation; SIZE]) -> Self {
-        Self { ops }
-    }
+	pub fn new(ops: [Operation; SIZE]) -> Self {
+		Self { ops }
+	}
 
-    pub fn new_from_size() -> Self {
-        Operations::new(std::array::from_fn::<_, SIZE, _>(|_| Operation::new()))
-    }
+	pub fn new_from_size() -> Self {
+		Operations::new(std::array::from_fn::<_, SIZE, _>(|_| Operation::new()))
+	}
 
-    pub unsafe fn submit<'a, const ID: u32>(
-        &'a self,
-        rt: &'a UringData,
-        entry: squeue::Entry,
-    ) -> SubmitOperation<'a> {
-        let () = AssertOperationBounds::<ID, SIZE>::OK;
+	pub unsafe fn submit<'a, const ID: u32>(
+		&'a self,
+		rt: &'a UringData,
+		entry: squeue::Entry,
+	) -> SubmitOperation<'a> {
+		let () = AssertOperationBounds::<ID, SIZE>::OK;
 
-        SubmitOperation {
-            op: &self.ops[ID as usize],
-            rt,
-            entry: Some(entry),
-        }
-    }
+		SubmitOperation {
+			op: &self.ops[ID as usize],
+			rt,
+			entry: Some(entry),
+		}
+	}
 
-    pub fn get(&self, id: u32) -> Option<&Operation> {
-        self.ops.get(id as usize)
-    }
+	pub fn get(&self, id: u32) -> Option<&Operation> {
+		self.ops.get(id as usize)
+	}
 
-    pub fn inflight(&self) -> usize {
-        self.ops
-            .iter()
-            .map(|x| x.state())
-            .filter(|x| matches!(x, OperationState::Waiting))
-            .count()
-    }
+	pub fn inflight(&self) -> usize {
+		self.ops
+			.iter()
+			.map(Operation::state)
+			.filter(|x| matches!(x, OperationState::Waiting))
+			.count()
+	}
 }
 
 pub(crate) struct SubmitOperation<'a> {
-    op: &'a Operation,
-    rt: &'a UringData,
-    entry: Option<squeue::Entry>,
+	op: &'a Operation,
+	rt: &'a UringData,
+	entry: Option<squeue::Entry>,
 }
 
-impl<'a> Future for SubmitOperation<'a> {
-    type Output = Result<i32>;
+impl Future for SubmitOperation<'_> {
+	type Output = Result<i32>;
 
-    #[inline(always)]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(entry) = self.entry.take() {
-            self.op.register(cx);
-            // SAFETY: enforced by caller
-            unsafe { self.rt.submit(&entry)? };
-            Poll::Pending
-        } else if let OperationState::Finished(ret) = self.op.state() {
-            if ret < 0 {
-                return Poll::Ready(Err(io::Error::from_raw_os_error(-ret).into()));
-            } else {
-                return Poll::Ready(Ok(ret));
-            }
-        } else {
-            self.op.register(cx);
-            Poll::Pending
-        }
-    }
+	#[inline(always)]
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		if let Some(entry) = self.entry.take() {
+			self.op.register(cx);
+			// SAFETY: enforced by caller
+			unsafe { self.rt.submit(&entry)? };
+			Poll::Pending
+		} else if let OperationState::Finished(ret) = self.op.state() {
+			if ret < 0 {
+				return Poll::Ready(Err(io::Error::from_raw_os_error(-ret).into()));
+			}
+			return Poll::Ready(Ok(ret));
+		} else {
+			self.op.register(cx);
+			Poll::Pending
+		}
+	}
 }
