@@ -1,6 +1,10 @@
-use std::{os::fd::OwnedFd, sync::Arc, task::Waker};
+use std::{
+	os::fd::OwnedFd,
+	pin::Pin,
+	task::{Context, Poll, Waker},
+};
 
-use futures::channel::oneshot;
+use futures::{AsyncRead, AsyncWrite, channel::oneshot, ready};
 use io_uring::{opcode, types::Fixed};
 
 use crate::{
@@ -22,6 +26,7 @@ pub struct TcpStream {
 impl TcpStream {
 	const READ_OP_ID: u32 = 0;
 	const WRITE_OP_ID: u32 = 1;
+	const CLOSE_OP_ID: u32 = 2;
 
 	pub(crate) async fn new(
 		std: std::net::TcpStream,
@@ -33,7 +38,7 @@ impl TcpStream {
 
 		let (tx, rx) = oneshot::channel();
 
-		let ops = Arc::new(Operations::new_from_size());
+		let ops = Operations::new_from_size();
 
 		sender.send(WorkerMessage::RegisterResource {
 			ops,
@@ -49,47 +54,97 @@ impl TcpStream {
 			sender,
 		})
 	}
+}
 
-	pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-		let Some(rt) = self.rt.load() else {
-			return Err(Error::NoRuntime);
+impl AsyncRead for TcpStream {
+	fn poll_read(
+		mut self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		buf: &mut [u8],
+	) -> Poll<std::io::Result<usize>> {
+		let this = &mut *self;
+		let Some(rt) = this.rt.load() else {
+			return Poll::Ready(Err(std::io::Error::other(Error::NoRuntime)));
 		};
 
-		let entry = opcode::Recv::new(Fixed(self.resource.id), buf.as_mut_ptr(), buf.len() as u32)
-			.build()
-			.user_data(
-				EventData {
-					resource: self.resource.id,
-					id: Self::READ_OP_ID,
+		let id = this.resource.id;
+		let ops = ready!(this.resource.poll_ops(cx));
+		let ret = match ready!(ops.poll_submit::<{ Self::READ_OP_ID }>(cx)) {
+			Some(Ok(val)) => Poll::Ready(Ok(val as usize)),
+			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
+			None => {
+				let entry = opcode::Recv::new(Fixed(id), buf.as_mut_ptr(), buf.len() as u32)
+					.build()
+					.user_data(
+						EventData {
+							resource: id,
+							id: Self::READ_OP_ID,
+						}
+						.into(),
+					);
+
+				if let Err(err) = unsafe { ops.start_submit::<{ Self::READ_OP_ID }>(rt, &entry, cx) }
+				{
+					Poll::Ready(Err(std::io::Error::other(err)))
+				} else {
+					Poll::Pending
 				}
-				.into(),
-			);
+			}
+		};
 
-		let ops = self.resource.ops().await;
-		let amt = unsafe { ops.submit::<{ Self::READ_OP_ID }>(rt, entry) }.await?;
+		this.resource.disarm();
+		ret
+	}
+}
 
-		Ok(amt as usize)
+impl AsyncWrite for TcpStream {
+	fn poll_write(
+		mut self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		buf: &[u8],
+	) -> Poll<std::io::Result<usize>> {
+		let this = &mut *self;
+		let Some(rt) = this.rt.load() else {
+			return Poll::Ready(Err(std::io::Error::other(Error::NoRuntime)));
+		};
+
+		let id = this.resource.id;
+		let ops = ready!(this.resource.poll_ops(cx));
+		let ret = match ready!(ops.poll_submit::<{ Self::WRITE_OP_ID }>(cx)) {
+			Some(Ok(val)) => Poll::Ready(Ok(val as usize)),
+			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
+			None => {
+				let entry = opcode::Send::new(Fixed(id), buf.as_ptr(), buf.len() as u32)
+					.build()
+					.user_data(
+						EventData {
+							resource: id,
+							id: Self::WRITE_OP_ID,
+						}
+						.into(),
+					);
+
+				if let Err(err) =
+					unsafe { ops.start_submit::<{ Self::WRITE_OP_ID }>(rt, &entry, cx) }
+				{
+					Poll::Ready(Err(std::io::Error::other(err)))
+				} else {
+					Poll::Pending
+				}
+			}
+		};
+
+		this.resource.disarm();
+		ret
 	}
 
-	pub async fn write(&mut self, buf: &[u8]) -> Result<usize> {
-		let Some(rt) = self.rt.load() else {
-			return Err(Error::NoRuntime);
-		};
+	fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+		// flush is noop
+		Poll::Ready(Ok(()))
+	}
 
-		let entry = opcode::Send::new(Fixed(self.resource.id), buf.as_ptr(), buf.len() as u32)
-			.build()
-			.user_data(
-				EventData {
-					resource: self.resource.id,
-					id: Self::WRITE_OP_ID,
-				}
-				.into(),
-			);
-
-		let ops = self.resource.ops().await;
-		let amt = unsafe { ops.submit::<{ Self::WRITE_OP_ID }>(rt, entry) }.await?;
-
-		Ok(amt as usize)
+	fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+		todo!()
 	}
 }
 

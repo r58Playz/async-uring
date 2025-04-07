@@ -1,4 +1,4 @@
-use std::{os::fd::OwnedFd, sync::Arc, task::Waker};
+use std::{os::fd::OwnedFd, task::Waker};
 
 use futures::{StreamExt, TryStreamExt};
 use io_uring::cqueue;
@@ -30,7 +30,7 @@ pub(crate) enum WorkerMessage {
 	},
 	RegisterResource {
 		fd: OwnedFd,
-		ops: Arc<Operations>,
+		ops: Operations,
 		complete: RegisterResourceSender,
 	},
 	CloseResource {

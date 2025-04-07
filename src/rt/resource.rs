@@ -1,8 +1,5 @@
 use std::{
-	future::poll_fn,
-	ops::Deref,
 	os::fd::{AsRawFd, OwnedFd},
-	sync::Arc,
 	task::{Context, Poll, ready},
 };
 
@@ -93,7 +90,7 @@ impl<'a> WorkerResourceSlab<'a> {
 
 pub(super) struct WorkerResource {
 	pub fd: OwnedFd,
-	pub ops: Arc<Operations>,
+	pub ops: Operations,
 }
 
 pub(super) type RegisterResourceSender = oneshot::Sender<Result<Resource>>;
@@ -106,13 +103,13 @@ pub(super) struct PendingResize {
 pub(crate) struct Resource {
 	ops_disabled: OpsDisabled,
 
-	ops: Arc<Operations>,
+	ops: Operations,
 
 	pub id: u32,
 }
 
 impl Resource {
-	pub(super) fn new(id: u32, ops_disabled: OpsDisabled, ops: Arc<Operations>) -> Self {
+	pub(super) fn new(id: u32, ops_disabled: OpsDisabled, ops: Operations) -> Self {
 		Self {
 			ops_disabled,
 			ops,
@@ -121,41 +118,13 @@ impl Resource {
 	}
 
 	#[inline(always)]
-	pub fn poll_ops(&mut self, cx: &mut Context) -> Poll<&Operations> {
+	pub fn poll_ops(&mut self, cx: &mut Context) -> Poll<&mut Operations> {
 		ready!(self.ops_disabled.poll_arm(cx));
-		Poll::Ready(&self.ops)
-	}
-
-	#[inline(always)]
-	pub async fn ops(&mut self) -> OperationsGuard {
-		poll_fn(|cx| self.ops_disabled.poll_arm(cx)).await;
-
-		OperationsGuard {
-			disabled: &mut self.ops_disabled,
-			ops: &self.ops,
-		}
+		Poll::Ready(&mut self.ops)
 	}
 
 	#[inline(always)]
 	pub fn disarm(&mut self) {
 		self.ops_disabled.disarm();
-	}
-}
-
-pub(crate) struct OperationsGuard<'a> {
-	ops: &'a Operations,
-	disabled: &'a mut OpsDisabled,
-}
-
-impl Deref for OperationsGuard<'_> {
-	type Target = Operations;
-
-	fn deref(&self) -> &Operations {
-		self.ops
-	}
-}
-impl Drop for OperationsGuard<'_> {
-	fn drop(&mut self) {
-		self.disabled.disarm();
 	}
 }

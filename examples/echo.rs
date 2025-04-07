@@ -1,6 +1,7 @@
 use std::env::args;
 
 use async_uring::{Result, net::tcp::TcpStream, rt::UringRuntime, tokio::TokioAsyncFd};
+use futures::{AsyncReadExt, AsyncWriteExt};
 use tokio::{net::TcpListener, task::coop::unconstrained};
 
 #[tokio::main(flavor = "current_thread")]
@@ -15,7 +16,7 @@ async fn main() -> Result<()> {
 
 	while let Ok((stream, addr)) = listener.accept().await {
 		let stream = rt.register_tcp(stream.into_std()?).await?;
-		println!("accepted {:?}", addr);
+		println!("accepted {addr:?}");
 		tokio::spawn(handle(stream));
 	}
 
@@ -32,6 +33,6 @@ async fn handle(mut stream: TcpStream) -> Result<()> {
 			break Ok(());
 		}
 
-		stream.write(&buf[0..cnt]).await?;
+		stream.write_all(&buf[0..cnt]).await?;
 	}
 }

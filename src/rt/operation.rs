@@ -1,7 +1,6 @@
 use std::{
 	cell::UnsafeCell,
 	io,
-	pin::Pin,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, AtomicU64, Ordering},
@@ -266,6 +265,12 @@ impl Operation {
 	}
 }
 
+#[derive(Copy, Clone)]
+enum OperationPollState {
+	Idle,
+	Submitting,
+}
+
 // funny hack to workaround no const generic expressions on stable
 struct AssertOperationBounds<const ID: u32, const SIZE: usize>;
 impl<const ID: u32, const SIZE: usize> AssertOperationBounds<ID, SIZE> {
@@ -273,29 +278,72 @@ impl<const ID: u32, const SIZE: usize> AssertOperationBounds<ID, SIZE> {
 }
 
 pub(crate) struct Operations<const SIZE: usize = 4> {
-	ops: [Operation; SIZE],
+	ops: Arc<[Operation; SIZE]>,
+	submissions: [OperationPollState; SIZE],
+}
+
+impl<const SIZE: usize> Clone for Operations<SIZE> {
+	fn clone(&self) -> Self {
+		Self {
+			ops: self.ops.clone(),
+			submissions: [OperationPollState::Idle; SIZE],
+		}
+	}
 }
 
 impl<const SIZE: usize> Operations<SIZE> {
 	pub fn new(ops: [Operation; SIZE]) -> Self {
-		Self { ops }
+		Self {
+			ops: Arc::new(ops),
+			submissions: [OperationPollState::Idle; SIZE],
+		}
 	}
 
 	pub fn new_from_size() -> Self {
 		Operations::new(std::array::from_fn::<_, SIZE, _>(|_| Operation::new()))
 	}
 
-	pub unsafe fn submit<'a, const ID: u32>(
-		&'a self,
-		rt: &'a UringData,
-		entry: squeue::Entry,
-	) -> SubmitOperation<'a> {
+	pub unsafe fn start_submit<const ID: u32>(
+		&mut self,
+		rt: &UringData,
+		entry: &squeue::Entry,
+		cx: &mut Context,
+	) -> Result<()> {
 		let () = AssertOperationBounds::<ID, SIZE>::OK;
+		let op = &self.ops[ID as usize];
+		let submission = &mut self.submissions[ID as usize];
 
-		SubmitOperation {
-			op: &self.ops[ID as usize],
-			rt,
-			entry: Some(entry),
+		op.register(cx);
+		// SAFETY: enforced by caller
+		unsafe { rt.submit(entry)? };
+		*submission = OperationPollState::Submitting;
+
+		Ok(())
+	}
+
+	pub fn poll_submit<const ID: u32>(&mut self, cx: &mut Context) -> Poll<Option<Result<u32>>> {
+		let () = AssertOperationBounds::<ID, SIZE>::OK;
+		let op = &self.ops[ID as usize];
+		let submission = &mut self.submissions[ID as usize];
+
+		match *submission {
+			OperationPollState::Idle => Poll::Ready(None),
+			OperationPollState::Submitting => {
+				if let OperationState::Finished(ret) = op.state() {
+					*submission = OperationPollState::Idle;
+
+					if ret < 0 {
+						Poll::Ready(Some(Err(io::Error::from_raw_os_error(-ret).into())))
+					} else {
+						// we already check if it's below 0
+						#[expect(clippy::cast_sign_loss)]
+						Poll::Ready(Some(Ok(ret as u32)))
+					}
+				} else {
+					op.register(cx);
+					Poll::Pending
+				}
+			}
 		}
 	}
 
@@ -309,33 +357,5 @@ impl<const SIZE: usize> Operations<SIZE> {
 			.map(Operation::state)
 			.filter(|x| matches!(x, OperationState::Waiting))
 			.count()
-	}
-}
-
-pub(crate) struct SubmitOperation<'a> {
-	op: &'a Operation,
-	rt: &'a UringData,
-	entry: Option<squeue::Entry>,
-}
-
-impl Future for SubmitOperation<'_> {
-	type Output = Result<i32>;
-
-	#[inline(always)]
-	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		if let Some(entry) = self.entry.take() {
-			self.op.register(cx);
-			// SAFETY: enforced by caller
-			unsafe { self.rt.submit(&entry)? };
-			Poll::Pending
-		} else if let OperationState::Finished(ret) = self.op.state() {
-			if ret < 0 {
-				return Poll::Ready(Err(io::Error::from_raw_os_error(-ret).into()));
-			}
-			return Poll::Ready(Ok(ret));
-		} else {
-			self.op.register(cx);
-			Poll::Pending
-		}
 	}
 }
