@@ -31,6 +31,7 @@ missing_errors_doc = "allow"
 missing_fields_in_debug = "allow"
 must_use_candidate = "allow"
 inline_always = "allow"
+undocumented_unsafe_blocks = "warn"
 
 [[example]]
 name = "echo"

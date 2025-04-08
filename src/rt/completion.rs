@@ -13,13 +13,16 @@ pub struct CqueueStream<'a, Fd: AsyncFd> {
 	fd: Fd,
 	cqueue: CompletionQueue<'a>,
 }
+// SAFETY: we are the only ones using the cqueue
 unsafe impl<Fd: AsyncFd> Sync for CqueueStream<'_, Fd> {}
+// SAFETY: we are the only ones using the cqueue
 unsafe impl<Fd: AsyncFd> Send for CqueueStream<'_, Fd> {}
 
 impl<'a, Fd: AsyncFd> CqueueStream<'a, Fd> {
 	pub fn new(rt: &'a UringData) -> crate::Result<Self> {
 		let fd = Fd::new(rt.uring.as_raw_fd())?;
 
+		// SAFETY: we are the only ones using the cqueue
 		let cqueue = unsafe { rt.uring.completion_shared() };
 
 		Ok(Self { fd, cqueue })

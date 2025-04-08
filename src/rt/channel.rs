@@ -66,6 +66,7 @@ impl<T> Stream for ChannelRecv<T> {
 			Poll::Ready(None)
 		} else if self.inner.empty.load(Ordering::Acquire) {
 			// senders haven't sent anything yet
+			// SAFETY: this is the only task registering
 			unsafe { self.inner.waker.register(cx.waker()) };
 			Poll::Pending
 		} else {

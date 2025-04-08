@@ -189,8 +189,8 @@ impl From<u64> for OperationState {
 			// data is only ever an i32
 			#[expect(clippy::cast_possible_truncation)]
 			2 => Self::Finished((data >> 3) as i32),
-			// data is only ever an 8 byte aligned pointer
 			#[expect(clippy::cast_possible_truncation)]
+			// SAFETY: data is only ever an 8 byte aligned pointer
 			3 => Self::Cancelled(unsafe {
 				Box::from_raw(std::ptr::null_mut::<OperationCancelData>().with_addr(data as usize))
 			}),
@@ -219,7 +219,9 @@ pub(crate) struct Operation {
 	waker: UnsafeCell<Waker>,
 }
 
+// SAFETY: OperationState acts as a mutex and waker is send/sync
 unsafe impl Sync for Operation {}
+// SAFETY: OperationState acts as a mutex and waker is send/sync
 unsafe impl Send for Operation {}
 
 impl Operation {
@@ -236,6 +238,7 @@ impl Operation {
 		self.state
 			.store(OperationState::Waiting.into(), Ordering::Release);
 
+		// SAFETY: we are waiting
 		unsafe { &mut *self.waker.get() }.clone_from(cx.waker());
 	}
 
@@ -252,7 +255,8 @@ impl Operation {
 		let cancel = state.cancel_data();
 
 		if cancel.as_ref().is_none_or(|x| x.wake) {
-			unsafe { &mut *self.waker.get() }.wake_by_ref();
+			// SAFETY: we are finished
+			unsafe { &*self.waker.get() }.wake_by_ref();
 		}
 
 		// drop anything that was needed for the op to complete safely
@@ -303,6 +307,7 @@ impl<const SIZE: usize> Operations<SIZE> {
 		Operations::new(std::array::from_fn::<_, SIZE, _>(|_| Operation::new()))
 	}
 
+	/// SAFETY: make sure entry will stay alive
 	pub unsafe fn start_submit<const ID: u32>(
 		&mut self,
 		rt: &UringData,
