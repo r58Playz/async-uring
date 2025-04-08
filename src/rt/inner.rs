@@ -29,7 +29,7 @@ pub(crate) enum WorkerMessage {
 		event: cqueue::Entry,
 	},
 	RegisterResource {
-		fd: OwnedFd,
+		fd: Option<OwnedFd>,
 		ops: Operations,
 		complete: RegisterResourceSender,
 	},

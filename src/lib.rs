@@ -1,5 +1,6 @@
 pub mod net;
 pub mod rt;
+pub mod nop;
 
 #[cfg(feature = "tokio")]
 pub mod tokio;

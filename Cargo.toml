@@ -15,7 +15,7 @@ thiserror = "2.0.12"
 tokio = { version = "1.44.1", features = ["net"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.44.1", features = ["rt", "rt-multi-thread", "macros", "net"], default-features = false }
+tokio = { version = "1.44.1", features = ["rt", "rt-multi-thread", "macros", "net", "time"], default-features = false }
 
 [features]
 default = ["tokio"]
@@ -34,4 +34,8 @@ inline_always = "allow"
 
 [[example]]
 name = "echo"
+required-features = ["tokio"]
+
+[[example]]
+name = "tcp_load_test"
 required-features = ["tokio"]

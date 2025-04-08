@@ -9,7 +9,7 @@ use std::{
 use inner::{RuntimeWorkerChannel, UringRuntimeWorker, WorkerMessage};
 use io_uring::{IoUring, cqueue, squeue};
 
-use crate::{Result, net::tcp::TcpStream};
+use crate::{net::tcp::TcpStream, nop::NopStream, Result};
 
 mod channel;
 mod completion;
@@ -137,6 +137,10 @@ impl UringRuntime {
 
 	pub async fn register_tcp(&self, stream: std::net::TcpStream) -> Result<TcpStream> {
 		TcpStream::new(stream, self.data.clone(), self.rt.clone()).await
+	}
+
+	pub async fn nop_stream(&self) -> Result<NopStream> {
+		NopStream::new(self.data.clone(), self.rt.clone()).await
 	}
 
 	pub fn stop(&self) -> Result<()> {

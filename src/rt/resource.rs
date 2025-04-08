@@ -1,5 +1,5 @@
 use std::{
-	os::fd::{AsRawFd, OwnedFd},
+	os::fd::{AsRawFd, OwnedFd, RawFd},
 	task::{Context, Poll, ready},
 };
 
@@ -47,14 +47,15 @@ impl<'a> WorkerResourceSlab<'a> {
 		self.rt.uring.submitter().register_files_sparse(capacity)?;
 
 		// add back fds
-		let fds: Vec<_> = self.slab.iter().map(|x| x.1.fd.as_raw_fd()).collect();
+		let fds: Vec<_> = self.slab.iter().map(|x| x.1.get_uring_fd()).collect();
 		self.rt.uring.submitter().register_files_update(0, &fds)?;
 
 		Ok(())
 	}
 
 	pub fn insert(&mut self, resource: WorkerResource) -> Result<u32> {
-		let fd = resource.fd.as_raw_fd();
+		let fd = resource.get_uring_fd();
+
 		let key = self
 			.slab
 			.insert(resource)
@@ -89,8 +90,14 @@ impl<'a> WorkerResourceSlab<'a> {
 }
 
 pub(super) struct WorkerResource {
-	pub fd: OwnedFd,
+	pub fd: Option<OwnedFd>,
 	pub ops: Operations,
+}
+
+impl WorkerResource {
+	pub fn get_uring_fd(&self) -> RawFd {
+		self.fd.as_ref().map_or(-1, AsRawFd::as_raw_fd)
+	}
 }
 
 pub(super) type RegisterResourceSender = oneshot::Sender<Result<Resource>>;

@@ -42,7 +42,7 @@ impl TcpStream {
 
 		sender.send(WorkerMessage::RegisterResource {
 			ops,
-			fd,
+			fd: Some(fd),
 			complete: tx,
 		})?;
 
