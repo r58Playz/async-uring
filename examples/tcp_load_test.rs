@@ -19,13 +19,16 @@ async fn main() -> Result<()> {
 	tokio::spawn(unconstrained(fut));
 
 	let addr = SocketAddr::from_str(&args().nth(1).unwrap()).unwrap();
-	let cnt = usize::from_str(&args().nth(2).unwrap()).unwrap();
+	let socket_cnt = usize::from_str(&args().nth(2).unwrap()).unwrap();
 	let size = args()
 		.nth(3)
 		.map_or(16 * 1024, |x| usize::from_str(&x).unwrap());
+	let duration = args()
+		.nth(4)
+		.map(|x| Duration::from_secs(u64::from_str(&x).unwrap()));
 
-	let mut sockets = Vec::with_capacity(cnt);
-	for _ in 0..cnt {
+	let mut sockets = Vec::with_capacity(socket_cnt);
+	for _ in 0..socket_cnt {
 		sockets.push(
 			rt.register_tcp(tokio::net::TcpStream::connect(addr).await?.into_std()?)
 				.await?,
@@ -34,16 +37,17 @@ async fn main() -> Result<()> {
 
 	let mut set = JoinSet::new();
 
-	println!("Starting with {size} byte packets and {cnt} sockets");
+	println!("Starting with {size} byte packets and {socket_cnt} sockets");
 
 	set.spawn(async move {
+		let start = Instant::now();
 		let mut last = 0;
 		let mut last_time = Instant::now();
 		let mut interval = tokio::time::interval(Duration::from_secs(5));
 
 		interval.tick().await;
 
-		loop {
+		while duration.is_none_or(|x| start.elapsed() < x) {
 			let time = interval.tick().await.into_std();
 
 			let val = COUNT.load(Ordering::Relaxed);
@@ -57,6 +61,12 @@ async fn main() -> Result<()> {
 			let amt = cnt as f64 / duration.as_secs_f64();
 			println!("Req/sec: {amt:.2} ({cnt} / {duration:?})");
 		}
+
+		let duration = start.elapsed();
+		let amt = last as f64 / duration.as_secs_f64();
+		println!("Avg: {amt:.2} ({last} / {duration:?})");
+
+		Ok(())
 	});
 
 	for socket in sockets {
