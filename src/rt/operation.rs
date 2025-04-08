@@ -214,32 +214,59 @@ impl From<OperationState> for u64 {
 	}
 }
 
-pub(crate) struct Operation {
+// funny hack to workaround no const generic expressions on stable
+struct AssertOperationBounds<const ID: u32, const SIZE: usize>;
+impl<const ID: u32, const SIZE: usize> AssertOperationBounds<ID, SIZE> {
+	const OK: () = assert!((ID as usize) < SIZE, "operation out of bounds");
+}
+
+struct OperationWakerList<const SIZE: usize> {
+	wakers: [Waker; SIZE],
+}
+impl<const SIZE: usize> OperationWakerList<SIZE> {
+	pub fn new() -> Self {
+		Self {
+			wakers: std::array::from_fn(|_| Waker::noop().clone()),
+		}
+	}
+
+	pub fn register<const ID: u32>(&mut self, cx: &mut Context) {
+		let () = AssertOperationBounds::<ID, SIZE>::OK;
+		self.wakers[ID as usize].clone_from(cx.waker());
+	}
+	pub fn wake(&mut self) {
+		for waker in &mut self.wakers {
+			std::mem::replace(waker, Waker::noop().clone()).wake();
+		}
+	}
+}
+
+pub(crate) struct Operation<const SIZE: usize> {
 	state: AtomicU64,
-	waker: UnsafeCell<Waker>,
+	waker: UnsafeCell<OperationWakerList<SIZE>>,
 }
 
 // SAFETY: OperationState acts as a mutex and waker is send/sync
-unsafe impl Sync for Operation {}
+unsafe impl<const SIZE: usize> Sync for Operation<SIZE> {}
 // SAFETY: OperationState acts as a mutex and waker is send/sync
-unsafe impl Send for Operation {}
+unsafe impl<const SIZE: usize> Send for Operation<SIZE> {}
 
-impl Operation {
+impl<const SIZE: usize> Operation<SIZE> {
 	pub fn new() -> Self {
 		Self {
 			state: AtomicU64::new(OperationState::Finished(0).into()),
-			waker: UnsafeCell::new(Waker::noop().clone()),
+			waker: UnsafeCell::new(OperationWakerList::new()),
 		}
 	}
 
 	#[inline(always)]
-	pub fn register(&self, cx: &mut Context<'_>) {
+	pub fn register<const ID: u32>(&self, cx: &mut Context<'_>) {
 		debug_assert!(matches!(self.state(), OperationState::Finished(_)));
 		self.state
 			.store(OperationState::Waiting.into(), Ordering::Release);
 
 		// SAFETY: we are waiting
-		unsafe { &mut *self.waker.get() }.clone_from(cx.waker());
+		unsafe { &mut *self.waker.get() }.register::<ID>(cx);
 	}
 
 	#[inline(always)]
@@ -256,7 +283,7 @@ impl Operation {
 
 		if cancel.as_ref().is_none_or(|x| x.wake) {
 			// SAFETY: we are finished
-			unsafe { &*self.waker.get() }.wake_by_ref();
+			unsafe { &mut *self.waker.get() }.wake();
 		}
 
 		// drop anything that was needed for the op to complete safely
@@ -275,14 +302,8 @@ enum OperationPollState {
 	Submitting,
 }
 
-// funny hack to workaround no const generic expressions on stable
-struct AssertOperationBounds<const ID: u32, const SIZE: usize>;
-impl<const ID: u32, const SIZE: usize> AssertOperationBounds<ID, SIZE> {
-	const OK: () = assert!((ID as usize) < SIZE, "operation out of bounds");
-}
-
 pub(crate) struct Operations<const SIZE: usize = 4> {
-	ops: Arc<[Operation; SIZE]>,
+	ops: Arc<[Operation<SIZE>; SIZE]>,
 	submissions: [OperationPollState; SIZE],
 }
 
@@ -296,7 +317,7 @@ impl<const SIZE: usize> Clone for Operations<SIZE> {
 }
 
 impl<const SIZE: usize> Operations<SIZE> {
-	pub fn new(ops: [Operation; SIZE]) -> Self {
+	pub fn new(ops: [Operation<SIZE>; SIZE]) -> Self {
 		Self {
 			ops: Arc::new(ops),
 			submissions: [OperationPollState::Idle; SIZE],
@@ -318,7 +339,7 @@ impl<const SIZE: usize> Operations<SIZE> {
 		let op = &self.ops[ID as usize];
 		let submission = &mut self.submissions[ID as usize];
 
-		op.register(cx);
+		op.register::<ID>(cx);
 		// SAFETY: enforced by caller
 		unsafe { rt.submit(entry)? };
 		*submission = OperationPollState::Submitting;
@@ -345,14 +366,31 @@ impl<const SIZE: usize> Operations<SIZE> {
 						Poll::Ready(Some(Ok(ret as u32)))
 					}
 				} else {
-					op.register(cx);
+					op.register::<ID>(cx);
 					Poll::Pending
 				}
 			}
 		}
 	}
 
-	pub fn get(&self, id: u32) -> Option<&Operation> {
+	pub fn poll_wait_for<const ID: u32>(&mut self, cx: &mut Context) -> Poll<()> {
+		let () = AssertOperationBounds::<ID, SIZE>::OK;
+		let op = &self.ops[ID as usize];
+		let submission = &mut self.submissions[ID as usize];
+		match *submission {
+			OperationPollState::Idle => Poll::Ready(()),
+			OperationPollState::Submitting => {
+				if let OperationState::Finished(_) = op.state() {
+					Poll::Ready(())
+				} else {
+					op.register::<ID>(cx);
+					Poll::Pending
+				}
+			}
+		}
+	}
+
+	pub fn get(&self, id: u32) -> Option<&Operation<SIZE>> {
 		self.ops.get(id as usize)
 	}
 

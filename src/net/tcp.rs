@@ -21,6 +21,8 @@ pub struct TcpStream {
 	rt: UringDataHandle,
 	resource: Resource,
 	sender: RuntimeWorkerChannel,
+
+	closing: bool,
 }
 
 impl TcpStream {
@@ -52,6 +54,8 @@ impl TcpStream {
 			rt,
 			resource,
 			sender,
+
+			closing: false,
 		})
 	}
 }
@@ -62,6 +66,9 @@ impl AsyncRead for TcpStream {
 		cx: &mut Context<'_>,
 		buf: &mut [u8],
 	) -> Poll<std::io::Result<usize>> {
+		if self.closing {
+			return Poll::Ready(Err(std::io::Error::other(Error::ResourceClosing)));
+		}
 		let this = &mut *self;
 		let Some(rt) = this.rt.load() else {
 			return Poll::Ready(Err(std::io::Error::other(Error::NoRuntime)));
@@ -83,7 +90,8 @@ impl AsyncRead for TcpStream {
 						.into(),
 					);
 
-				if let Err(err) = unsafe { ops.start_submit::<{ Self::READ_OP_ID }>(rt, &entry, cx) }
+				if let Err(err) =
+					unsafe { ops.start_submit::<{ Self::READ_OP_ID }>(rt, &entry, cx) }
 				{
 					Poll::Ready(Err(std::io::Error::other(err)))
 				} else {
@@ -103,6 +111,9 @@ impl AsyncWrite for TcpStream {
 		cx: &mut Context<'_>,
 		buf: &[u8],
 	) -> Poll<std::io::Result<usize>> {
+		if self.closing {
+			return Poll::Ready(Err(std::io::Error::other(Error::ResourceClosing)));
+		}
 		let this = &mut *self;
 		let Some(rt) = this.rt.load() else {
 			return Poll::Ready(Err(std::io::Error::other(Error::NoRuntime)));
@@ -143,8 +154,41 @@ impl AsyncWrite for TcpStream {
 		Poll::Ready(Ok(()))
 	}
 
-	fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-		todo!()
+	fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+		self.closing = true;
+		let this = &mut *self;
+		let Some(rt) = this.rt.load() else {
+			return Poll::Ready(Err(std::io::Error::other(Error::NoRuntime)));
+		};
+
+		let id = this.resource.id;
+		let ops = ready!(this.resource.poll_ops(cx));
+		ready!(ops.poll_wait_for::<{ Self::READ_OP_ID }>(cx));
+		ready!(ops.poll_wait_for::<{ Self::WRITE_OP_ID }>(cx));
+		let ret = match ready!(ops.poll_submit::<{ Self::CLOSE_OP_ID }>(cx)) {
+			Some(Ok(_)) => Poll::Ready(Ok(())),
+			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
+			None => {
+				let entry = opcode::Close::new(Fixed(id)).build().user_data(
+					EventData {
+						resource: id,
+						id: Self::CLOSE_OP_ID,
+					}
+					.into(),
+				);
+
+				if let Err(err) =
+					unsafe { ops.start_submit::<{ Self::CLOSE_OP_ID }>(rt, &entry, cx) }
+				{
+					Poll::Ready(Err(std::io::Error::other(err)))
+				} else {
+					Poll::Pending
+				}
+			}
+		};
+
+		this.resource.disarm();
+		ret
 	}
 }
 
