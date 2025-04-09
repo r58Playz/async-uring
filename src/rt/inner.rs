@@ -82,6 +82,8 @@ impl UringRuntimeWorker {
 						if let Some(op) = resource.ops.get(info.id) {
 							// this drops any data that was needed for the op if it was cancelled
 							op.wake(event.result());
+						} else {
+							panic!("dropped message {info:?}");
 						}
 					} else {
 						panic!("dropped message {info:?}");

@@ -1,8 +1,7 @@
 use std::env::args;
 
 use async_uring::{Result, net::tcp::TcpStream, rt::UringRuntime, tokio::TokioAsyncFd};
-use futures::{AsyncReadExt, AsyncWriteExt};
-use tokio::{net::TcpListener, task::coop::unconstrained};
+use tokio::{net::TcpListener, task::coop::unconstrained, io::{AsyncReadExt, AsyncWriteExt}};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {

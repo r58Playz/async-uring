@@ -4,8 +4,9 @@ use std::{
 	task::{Context, Poll, Waker},
 };
 
-use futures::{AsyncRead, AsyncWrite, channel::oneshot, ready};
+use futures::{channel::oneshot, ready};
 use io_uring::{opcode, types::Fixed};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
 	Error, Result,
@@ -64,11 +65,8 @@ impl AsyncRead for TcpStream {
 	fn poll_read(
 		mut self: Pin<&mut Self>,
 		cx: &mut Context<'_>,
-		buf: &mut [u8],
-	) -> Poll<std::io::Result<usize>> {
-		if self.closing {
-			return Poll::Ready(Err(std::io::Error::other(Error::ResourceClosing)));
-		}
+		buf: &mut tokio::io::ReadBuf<'_>,
+	) -> Poll<std::io::Result<()>> {
 		let this = &mut *self;
 		let Some(rt) = this.rt.load() else {
 			return Poll::Ready(Err(std::io::Error::other(Error::NoRuntime)));
@@ -77,10 +75,22 @@ impl AsyncRead for TcpStream {
 		let id = this.resource.id;
 		let ops = ready!(this.resource.poll_ops(cx));
 		let ret = match ready!(ops.poll_submit::<{ Self::READ_OP_ID }>(cx)) {
-			Some(Ok(val)) => Poll::Ready(Ok(val as usize)),
+			Some(Ok(val)) => {
+				unsafe { buf.assume_init(val as usize) };
+				buf.advance(val as usize);
+				Poll::Ready(Ok(()))
+			}
 			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
 			None => {
-				let entry = opcode::Recv::new(Fixed(id), buf.as_mut_ptr(), buf.len() as u32)
+				if this.closing {
+					Poll::Ready(Err(std::io::Error::other(Error::ResourceClosing)))
+				} else {
+					let uninit = unsafe { buf.unfilled_mut() };
+					let entry = opcode::Recv::new(
+						Fixed(id),
+						uninit.as_mut_ptr() as *mut u8,
+						uninit.len() as u32,
+					)
 					.build()
 					.user_data(
 						EventData {
@@ -90,12 +100,13 @@ impl AsyncRead for TcpStream {
 						.into(),
 					);
 
-				if let Err(err) =
-					unsafe { ops.start_submit::<{ Self::READ_OP_ID }>(rt, &entry, cx) }
-				{
-					Poll::Ready(Err(std::io::Error::other(err)))
-				} else {
-					Poll::Pending
+					if let Err(err) =
+						unsafe { ops.start_submit::<{ Self::READ_OP_ID }>(rt, &entry, cx) }
+					{
+						Poll::Ready(Err(std::io::Error::other(err)))
+					} else {
+						Poll::Pending
+					}
 				}
 			}
 		};
@@ -111,9 +122,6 @@ impl AsyncWrite for TcpStream {
 		cx: &mut Context<'_>,
 		buf: &[u8],
 	) -> Poll<std::io::Result<usize>> {
-		if self.closing {
-			return Poll::Ready(Err(std::io::Error::other(Error::ResourceClosing)));
-		}
 		let this = &mut *self;
 		let Some(rt) = this.rt.load() else {
 			return Poll::Ready(Err(std::io::Error::other(Error::NoRuntime)));
@@ -125,22 +133,27 @@ impl AsyncWrite for TcpStream {
 			Some(Ok(val)) => Poll::Ready(Ok(val as usize)),
 			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
 			None => {
-				let entry = opcode::Send::new(Fixed(id), buf.as_ptr(), buf.len() as u32)
-					.build()
-					.user_data(
-						EventData {
-							resource: id,
-							id: Self::WRITE_OP_ID,
-						}
-						.into(),
-					);
-
-				if let Err(err) =
-					unsafe { ops.start_submit::<{ Self::WRITE_OP_ID }>(rt, &entry, cx) }
-				{
-					Poll::Ready(Err(std::io::Error::other(err)))
+				if this.closing {
+					Poll::Ready(Err(std::io::Error::other(Error::ResourceClosing)))
 				} else {
-					Poll::Pending
+					let entry = opcode::Send::new(Fixed(id), buf.as_ptr(), buf.len() as u32)
+						.build()
+						.user_data(
+							EventData {
+								resource: id,
+								id: Self::WRITE_OP_ID,
+							}
+							.into(),
+						);
+
+					if let Err(err) =
+						unsafe { ops.start_submit::<{ Self::WRITE_OP_ID }>(rt, &entry, cx) }
+					{
+						Poll::Ready(Err(std::io::Error::other(err)))
+					} else {
+						// operation hasn't ended yet otherwise i would let it disarm
+						return Poll::Pending;
+					}
 				}
 			}
 		};
@@ -154,7 +167,7 @@ impl AsyncWrite for TcpStream {
 		Poll::Ready(Ok(()))
 	}
 
-	fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+	fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
 		self.closing = true;
 		let this = &mut *self;
 		let Some(rt) = this.rt.load() else {

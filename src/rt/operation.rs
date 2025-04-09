@@ -261,7 +261,10 @@ impl<const SIZE: usize> Operation<SIZE> {
 
 	#[inline(always)]
 	pub fn register<const ID: u32>(&self, cx: &mut Context<'_>) {
-		debug_assert!(matches!(self.state(), OperationState::Finished(_)));
+		debug_assert!(matches!(
+			self.state(),
+			OperationState::Finished(_) | OperationState::Waiting
+		));
 		self.state
 			.store(OperationState::Waiting.into(), Ordering::Release);
 
@@ -273,7 +276,7 @@ impl<const SIZE: usize> Operation<SIZE> {
 	pub fn wake(&self, val: i32) {
 		let state: OperationState = self
 			.state
-			.swap(OperationState::Finished(val).into(), Ordering::Release)
+			.swap(OperationState::Finished(val).into(), Ordering::AcqRel)
 			.into();
 		debug_assert!(matches!(
 			state,

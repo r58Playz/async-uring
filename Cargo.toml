@@ -12,14 +12,19 @@ libc = "0.2.171"
 pin-project-lite = "0.2.16"
 slab = "0.4.9"
 thiserror = "2.0.12"
-tokio = { version = "1.44.1", features = ["net"], optional = true }
+tokio = "1.44.1"
 
 [dev-dependencies]
-tokio = { version = "1.44.1", features = ["rt", "rt-multi-thread", "macros", "net", "time"], default-features = false }
+bytes = "1.10.1"
+http-body-util = "0.1.3"
+hyper = { version = "1.6.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.11", features = ["tokio"] }
+tokio = { version = "1.44.1", features = ["rt", "rt-multi-thread", "macros", "net", "time", "io-util"], default-features = false }
+tokio-util = { version = "0.7.14", features = ["compat"] }
 
 [features]
 default = ["tokio"]
-tokio = ["dep:tokio"]
+tokio = ["tokio/net"]
 
 [profile.release]
 debug = true
@@ -31,6 +36,7 @@ missing_errors_doc = "allow"
 missing_fields_in_debug = "allow"
 must_use_candidate = "allow"
 inline_always = "allow"
+redundant_else = "allow"
 undocumented_unsafe_blocks = "warn"
 
 [[example]]
