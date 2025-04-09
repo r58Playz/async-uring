@@ -44,5 +44,13 @@ name = "echo"
 required-features = ["tokio"]
 
 [[example]]
+name = "hyper"
+required-features = ["tokio"]
+
+[[example]]
+name = "nop"
+required-features = ["tokio"]
+
+[[example]]
 name = "tcp_load_test"
 required-features = ["tokio"]
