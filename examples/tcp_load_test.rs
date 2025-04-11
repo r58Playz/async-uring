@@ -7,8 +7,10 @@ use std::{
 };
 
 use async_uring::{Result, net::tcp::TcpStream, rt::UringRuntime, tokio::TokioAsyncFd};
-use futures::{AsyncReadExt, AsyncWriteExt};
-use tokio::task::{JoinSet, coop::unconstrained};
+use tokio::{
+	io::{AsyncReadExt, AsyncWriteExt},
+	task::{JoinSet, coop::unconstrained},
+};
 
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 

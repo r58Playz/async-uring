@@ -1,8 +1,7 @@
 use std::{
-	cell::UnsafeCell,
 	io,
 	sync::{
-		Arc,
+		Arc, Mutex,
 		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	task::{Context, Poll, Waker},
@@ -59,7 +58,7 @@ impl OpsDisabledData {
 	}
 
 	pub fn set(&self, disabled: bool) {
-		self.disabled.store(disabled, Ordering::Relaxed);
+		self.disabled.store(disabled, Ordering::Release);
 		if !disabled {
 			self.waker.notify_additional(usize::MAX);
 		}
@@ -81,9 +80,10 @@ impl OpsDisabledState {
 
 	#[inline(always)]
 	fn poll_arm(&mut self, data: &OpsDisabledData, cx: &mut Context) -> Poll<()> {
-		macro_rules! try_arm {
+		macro_rules! arm {
 			() => {
-				if data.disabled.load(Ordering::Relaxed) {
+				if data.disabled.load(Ordering::Acquire) {
+					*self = Self::Arming(data.waker.listen());
 					Poll::Pending
 				} else {
 					*self = Self::Armed;
@@ -94,25 +94,9 @@ impl OpsDisabledState {
 
 		match self {
 			Self::Armed => Poll::Ready(()),
-			Self::Disarmed => {
-				if data.disabled.load(Ordering::Relaxed) {
-					*self = Self::Arming(data.waker.listen());
-					try_arm!()
-				} else {
-					*self = Self::Armed;
-					Poll::Ready(())
-				}
-			}
+			Self::Disarmed => arm!(),
 			Self::Arming(ev) => match ev.poll_unpin(cx) {
-				Poll::Ready(()) => {
-					if data.disabled.load(Ordering::Relaxed) {
-						*self = Self::Arming(data.waker.listen());
-						try_arm!()
-					} else {
-						*self = Self::Armed;
-						Poll::Ready(())
-					}
-				}
+				Poll::Ready(()) => arm!(),
 				Poll::Pending => Poll::Pending,
 			},
 		}
@@ -157,22 +141,21 @@ impl OpsDisabled {
 }
 
 #[derive(Debug)]
-#[repr(align(8))]
+#[repr(align(4))]
 pub(crate) struct OperationCancelData {
 	wake: bool,
 }
 
 #[derive(Debug)]
 pub(crate) enum OperationState {
-	// only the op task can access waker here
 	Waiting,
-	// only happens if an op gets dropped while waiting. only op task can access waker
 	Cancelled(Box<OperationCancelData>),
-	// only the worker task can access waker here
 	Finished(i32),
 }
 
 impl OperationState {
+	const TAG_SIZE: u64 = 0b11;
+
 	pub fn cancel_data(self) -> Option<Box<OperationCancelData>> {
 		match self {
 			Self::Cancelled(x) => Some(x),
@@ -183,7 +166,7 @@ impl OperationState {
 
 impl From<u64> for OperationState {
 	fn from(value: u64) -> Self {
-		let (data, tag) = (value & !0b111, value & 0b111);
+		let (data, tag) = (value & !Self::TAG_SIZE, value & Self::TAG_SIZE);
 		match tag {
 			1 => Self::Waiting,
 			// data is only ever an i32
@@ -208,7 +191,8 @@ impl From<OperationState> for u64 {
 			OperationState::Cancelled(cleanup) => (Box::into_raw(cleanup).addr() as u64, 3u64),
 		};
 
-		debug_assert_eq!(tag & !0b111, 0);
+		debug_assert_eq!(tag & !OperationState::TAG_SIZE, 0);
+		debug_assert_eq!(ptr & OperationState::TAG_SIZE, 0);
 
 		ptr | (tag & 0b111)
 	}
@@ -221,21 +205,21 @@ impl<const ID: u32, const SIZE: usize> AssertOperationBounds<ID, SIZE> {
 }
 
 struct OperationWakerList<const SIZE: usize> {
-	wakers: [Waker; SIZE],
+	wakers: Mutex<[Waker; SIZE]>,
 }
 impl<const SIZE: usize> OperationWakerList<SIZE> {
 	pub fn new() -> Self {
 		Self {
-			wakers: std::array::from_fn(|_| Waker::noop().clone()),
+			wakers: Mutex::new(std::array::from_fn(|_| Waker::noop().clone())),
 		}
 	}
 
-	pub fn register<const ID: u32>(&mut self, cx: &mut Context) {
+	pub fn register<const ID: u32>(&self, cx: &mut Context) {
 		let () = AssertOperationBounds::<ID, SIZE>::OK;
-		self.wakers[ID as usize].clone_from(cx.waker());
+		self.wakers.lock().unwrap()[ID as usize].clone_from(cx.waker());
 	}
-	pub fn wake(&mut self) {
-		for waker in &mut self.wakers {
+	pub fn wake(&self) {
+		for waker in &mut *self.wakers.lock().unwrap() {
 			std::mem::replace(waker, Waker::noop().clone()).wake();
 		}
 	}
@@ -243,19 +227,14 @@ impl<const SIZE: usize> OperationWakerList<SIZE> {
 
 pub(crate) struct Operation<const SIZE: usize> {
 	state: AtomicU64,
-	waker: UnsafeCell<OperationWakerList<SIZE>>,
+	waker: OperationWakerList<SIZE>,
 }
-
-// SAFETY: OperationState acts as a mutex and waker is send/sync
-unsafe impl<const SIZE: usize> Sync for Operation<SIZE> {}
-// SAFETY: OperationState acts as a mutex and waker is send/sync
-unsafe impl<const SIZE: usize> Send for Operation<SIZE> {}
 
 impl<const SIZE: usize> Operation<SIZE> {
 	pub fn new() -> Self {
 		Self {
 			state: AtomicU64::new(OperationState::Finished(0).into()),
-			waker: UnsafeCell::new(OperationWakerList::new()),
+			waker: OperationWakerList::new(),
 		}
 	}
 
@@ -267,9 +246,7 @@ impl<const SIZE: usize> Operation<SIZE> {
 		));
 		self.state
 			.store(OperationState::Waiting.into(), Ordering::Release);
-
-		// SAFETY: we are waiting
-		unsafe { &mut *self.waker.get() }.register::<ID>(cx);
+		self.waker.register::<ID>(cx);
 	}
 
 	#[inline(always)]
@@ -285,8 +262,7 @@ impl<const SIZE: usize> Operation<SIZE> {
 		let cancel = state.cancel_data();
 
 		if cancel.as_ref().is_none_or(|x| x.wake) {
-			// SAFETY: we are finished
-			unsafe { &mut *self.waker.get() }.wake();
+			self.waker.wake();
 		}
 
 		// drop anything that was needed for the op to complete safely

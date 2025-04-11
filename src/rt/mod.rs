@@ -35,12 +35,12 @@ impl UringDataHandle {
 	pub fn load(&self) -> Option<&UringData> {
 		self.0
 			.alive
-			.load(Ordering::Relaxed)
+			.load(Ordering::Acquire)
 			.then_some(self.0.as_ref())
 	}
 
 	pub fn destroy(&self) {
-		self.0.alive.store(false, Ordering::Relaxed);
+		self.0.alive.store(false, Ordering::Release);
 	}
 }
 

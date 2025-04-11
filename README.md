@@ -12,8 +12,8 @@ Units are 16kb packets per second.
 All tests run with 100 sockets averaged over 30 seconds using `tcp_load_test` example in singlethread mode.
 Tests in other runtimes have been modified to change the buffer size to 16kb to make it fair.
 
-- `async-uring + tokio ST`: 168862.22
-- `async-uring + tokio MT`: 164889.61
+- `async-uring + tokio ST`: 167981.87
+- `async-uring + tokio MT`: 164639.51
 - `monoio`: 159179.67
 - `tokio-uring`: 155767.05
 - `tokio MT`: 111296.24
