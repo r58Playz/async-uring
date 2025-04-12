@@ -88,7 +88,7 @@ impl AsyncRead for TcpStream {
 					let uninit = unsafe { buf.unfilled_mut() };
 					let entry = opcode::Recv::new(
 						Fixed(id),
-						uninit.as_mut_ptr() as *mut u8,
+						uninit.as_mut_ptr().cast::<u8>(),
 						uninit.len() as u32,
 					)
 					.build()
@@ -105,7 +105,7 @@ impl AsyncRead for TcpStream {
 					{
 						Poll::Ready(Err(std::io::Error::other(err)))
 					} else {
-						Poll::Pending
+						return Poll::Pending;
 					}
 				}
 			}
@@ -130,7 +130,9 @@ impl AsyncWrite for TcpStream {
 		let id = this.resource.id;
 		let ops = ready!(this.resource.poll_ops(cx));
 		let ret = match ready!(ops.poll_submit::<{ Self::WRITE_OP_ID }>(cx)) {
-			Some(Ok(val)) => Poll::Ready(Ok(val as usize)),
+			Some(Ok(val)) => {
+				Poll::Ready(Ok(val as usize))
+			}
 			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
 			None => {
 				if this.closing {
@@ -176,8 +178,6 @@ impl AsyncWrite for TcpStream {
 
 		let id = this.resource.id;
 		let ops = ready!(this.resource.poll_ops(cx));
-		ready!(ops.poll_wait_for::<{ Self::READ_OP_ID }>(cx));
-		ready!(ops.poll_wait_for::<{ Self::WRITE_OP_ID }>(cx));
 		let ret = match ready!(ops.poll_submit::<{ Self::CLOSE_OP_ID }>(cx)) {
 			Some(Ok(_)) => Poll::Ready(Ok(())),
 			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),

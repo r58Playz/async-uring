@@ -38,8 +38,6 @@ impl<'a> WorkerResourceSlab<'a> {
 	}
 
 	pub fn resize(&mut self, capacity: u32) -> Result<()> {
-		println!("resizing kernel uring entries to {capacity:?}");
-
 		// clear fd table
 		self.rt.uring.submitter().unregister_files()?;
 

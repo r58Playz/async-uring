@@ -111,7 +111,6 @@ impl UringRuntimeWorker {
 
 						combined.get_state_mut().disable_actor = false;
 						ops_disabled.set(false);
-						println!("ops reenabled");
 					}
 				}
 				WorkerMessage::RegisterResource { ops, fd, complete } => {
@@ -121,7 +120,7 @@ impl UringRuntimeWorker {
 					};
 
 					if let Some(new_size) = resources.pending_resize() {
-						if dbg!(resources.inflight_ops()) != 0 {
+						if resources.inflight_ops() != 0 {
 							let _ = pending_resource_resize.insert(PendingResize {
 								worker,
 								complete,
@@ -129,7 +128,6 @@ impl UringRuntimeWorker {
 							});
 							combined.get_state_mut().disable_actor = true;
 							ops_disabled.set(true);
-							println!("ops disabled");
 
 							continue;
 						}

@@ -1,12 +1,13 @@
 use std::{
 	io,
 	sync::{
-		Arc, Mutex,
+		Arc,
 		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
-	task::{Context, Poll, Waker},
+	task::{Context, Poll},
 };
 
+use diatomic_waker::DiatomicWaker;
 use event_listener::{Event, EventListener};
 use futures::FutureExt;
 use io_uring::squeue;
@@ -204,49 +205,29 @@ impl<const ID: u32, const SIZE: usize> AssertOperationBounds<ID, SIZE> {
 	const OK: () = assert!((ID as usize) < SIZE, "operation out of bounds");
 }
 
-struct OperationWakerList<const SIZE: usize> {
-	wakers: Mutex<[Waker; SIZE]>,
-}
-impl<const SIZE: usize> OperationWakerList<SIZE> {
-	pub fn new() -> Self {
-		Self {
-			wakers: Mutex::new(std::array::from_fn(|_| Waker::noop().clone())),
-		}
-	}
-
-	pub fn register<const ID: u32>(&self, cx: &mut Context) {
-		let () = AssertOperationBounds::<ID, SIZE>::OK;
-		self.wakers.lock().unwrap()[ID as usize].clone_from(cx.waker());
-	}
-	pub fn wake(&self) {
-		for waker in &mut *self.wakers.lock().unwrap() {
-			std::mem::replace(waker, Waker::noop().clone()).wake();
-		}
-	}
-}
-
 pub(crate) struct Operation<const SIZE: usize> {
 	state: AtomicU64,
-	waker: OperationWakerList<SIZE>,
+	waker: DiatomicWaker,
 }
 
 impl<const SIZE: usize> Operation<SIZE> {
 	pub fn new() -> Self {
 		Self {
 			state: AtomicU64::new(OperationState::Finished(0).into()),
-			waker: OperationWakerList::new(),
+			waker: DiatomicWaker::new(),
 		}
 	}
 
 	#[inline(always)]
-	pub fn register<const ID: u32>(&self, cx: &mut Context<'_>) {
+	pub fn register(&self, cx: &mut Context<'_>) {
 		debug_assert!(matches!(
 			self.state(),
 			OperationState::Finished(_) | OperationState::Waiting
 		));
 		self.state
 			.store(OperationState::Waiting.into(), Ordering::Release);
-		self.waker.register::<ID>(cx);
+
+		unsafe { self.waker.register(cx.waker()) };
 	}
 
 	#[inline(always)]
@@ -262,7 +243,7 @@ impl<const SIZE: usize> Operation<SIZE> {
 		let cancel = state.cancel_data();
 
 		if cancel.as_ref().is_none_or(|x| x.wake) {
-			self.waker.wake();
+			self.waker.notify();
 		}
 
 		// drop anything that was needed for the op to complete safely
@@ -318,7 +299,7 @@ impl<const SIZE: usize> Operations<SIZE> {
 		let op = &self.ops[ID as usize];
 		let submission = &mut self.submissions[ID as usize];
 
-		op.register::<ID>(cx);
+		op.register(cx);
 		// SAFETY: enforced by caller
 		unsafe { rt.submit(entry)? };
 		*submission = OperationPollState::Submitting;
@@ -345,24 +326,7 @@ impl<const SIZE: usize> Operations<SIZE> {
 						Poll::Ready(Some(Ok(ret as u32)))
 					}
 				} else {
-					op.register::<ID>(cx);
-					Poll::Pending
-				}
-			}
-		}
-	}
-
-	pub fn poll_wait_for<const ID: u32>(&mut self, cx: &mut Context) -> Poll<()> {
-		let () = AssertOperationBounds::<ID, SIZE>::OK;
-		let op = &self.ops[ID as usize];
-		let submission = &mut self.submissions[ID as usize];
-		match *submission {
-			OperationPollState::Idle => Poll::Ready(()),
-			OperationPollState::Submitting => {
-				if let OperationState::Finished(_) = op.state() {
-					Poll::Ready(())
-				} else {
-					op.register::<ID>(cx);
+					op.register(cx);
 					Poll::Pending
 				}
 			}
