@@ -11,7 +11,7 @@ use crate::{
 	rt::{
 		UringDataHandle,
 		inner::{RuntimeWorkerChannel, WorkerMessage},
-		operation::{EventData, Operations},
+		operation::{Operations, poll_op_impl},
 		resource::Resource,
 	},
 };
@@ -20,6 +20,8 @@ pub struct NopStream {
 	rt: UringDataHandle,
 	resource: Resource,
 	sender: RuntimeWorkerChannel,
+
+	closing: bool,
 }
 
 impl NopStream {
@@ -42,6 +44,7 @@ impl NopStream {
 			rt,
 			resource,
 			sender,
+			closing: false,
 		})
 	}
 }
@@ -51,34 +54,11 @@ impl Stream for NopStream {
 
 	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
 		let this = &mut *self;
-		let Some(rt) = this.rt.load() else {
-			return Poll::Ready(Some(Err(Error::NoRuntime)));
-		};
-
-		let id = this.resource.id;
-		match ready!(this.resource.ops.poll_submit::<{ Self::NOP_OP_ID }>(cx)) {
-			Some(Ok(val)) => Poll::Ready(Some(Ok(val))),
-			Some(Err(err)) => Poll::Ready(Some(Err(err))),
-			None => {
-				let entry = opcode::Nop::new().build().user_data(
-					EventData {
-						resource: id,
-						id: Self::NOP_OP_ID,
-					}
-					.into(),
-				);
-
-				if let Err(err) = unsafe {
-					this.resource
-						.ops
-						.start_submit::<{ Self::NOP_OP_ID }>(rt, &entry, cx)
-				} {
-					Poll::Ready(Some(Err(err)))
-				} else {
-					Poll::Pending
-				}
-			}
-		}
+		poll_op_impl!(Self::NOP_OP_ID, this, cx, {
+			Some(Ok(val)) => |val| Poll::Ready(Ok(val)),
+			None => opcode::Nop::new
+		})
+		.map(Some)
 	}
 }
 

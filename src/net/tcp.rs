@@ -13,7 +13,7 @@ use crate::{
 	rt::{
 		UringDataHandle,
 		inner::{RuntimeWorkerChannel, WorkerMessage},
-		operation::{EventData, Operations},
+		operation::{Operations, poll_op_impl},
 		resource::Resource,
 	},
 };
@@ -72,49 +72,24 @@ impl AsyncRead for TcpStream {
 		buf: &mut tokio::io::ReadBuf<'_>,
 	) -> Poll<std::io::Result<()>> {
 		let this = &mut *self;
-		let Some(rt) = this.rt.load() else {
-			return Poll::Ready(Err(std::io::Error::other(Error::NoRuntime)));
-		};
-
-		let id = this.resource.id;
-		match ready!(this.resource.ops.poll_submit::<{ Self::READ_OP_ID }>(cx)) {
-			Some(Ok(val)) => {
+		poll_op_impl!(Self::READ_OP_ID, this, cx, {
+			Some(Ok(val)) => |val| {
+				// SAFETY: kernel just initialized these bytes in the read op
 				unsafe { buf.assume_init(val as usize) };
 				buf.advance(val as usize);
 				Poll::Ready(Ok(()))
+			},
+			None => || {
+				// SAFETY: we send it straight to the kernel and it doesn't de-initialize anything
+				let uninit = unsafe { buf.unfilled_mut() };
+				opcode::Recv::new(
+					Fd(this.fd),
+					uninit.as_mut_ptr().cast::<u8>(),
+					uninit.len() as u32,
+				)
 			}
-			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
-			None => {
-				if this.closing {
-					Poll::Ready(Err(std::io::Error::other(Error::ResourceClosing)))
-				} else {
-					let uninit = unsafe { buf.unfilled_mut() };
-					let entry = opcode::Recv::new(
-						Fd(this.fd),
-						uninit.as_mut_ptr().cast::<u8>(),
-						uninit.len() as u32,
-					)
-					.build()
-					.user_data(
-						EventData {
-							resource: id,
-							id: Self::READ_OP_ID,
-						}
-						.into(),
-					);
-
-					if let Err(err) = unsafe {
-						this.resource
-							.ops
-							.start_submit::<{ Self::READ_OP_ID }>(rt, &entry, cx)
-					} {
-						Poll::Ready(Err(std::io::Error::other(err)))
-					} else {
-						Poll::Pending
-					}
-				}
-			}
-		}
+		})
+		.map_err(std::io::Error::other)
 	}
 }
 
@@ -125,40 +100,11 @@ impl AsyncWrite for TcpStream {
 		buf: &[u8],
 	) -> Poll<std::io::Result<usize>> {
 		let this = &mut *self;
-		let Some(rt) = this.rt.load() else {
-			return Poll::Ready(Err(std::io::Error::other(Error::NoRuntime)));
-		};
-
-		let id = this.resource.id;
-		match ready!(this.resource.ops.poll_submit::<{ Self::WRITE_OP_ID }>(cx)) {
-			Some(Ok(val)) => Poll::Ready(Ok(val as usize)),
-			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
-			None => {
-				if this.closing {
-					Poll::Ready(Err(std::io::Error::other(Error::ResourceClosing)))
-				} else {
-					let entry = opcode::Send::new(Fd(this.fd), buf.as_ptr(), buf.len() as u32)
-						.build()
-						.user_data(
-							EventData {
-								resource: id,
-								id: Self::WRITE_OP_ID,
-							}
-							.into(),
-						);
-
-					if let Err(err) = unsafe {
-						this.resource
-							.ops
-							.start_submit::<{ Self::WRITE_OP_ID }>(rt, &entry, cx)
-					} {
-						Poll::Ready(Err(std::io::Error::other(err)))
-					} else {
-						Poll::Pending
-					}
-				}
-			}
-		}
+		poll_op_impl!(Self::WRITE_OP_ID, this, cx, {
+			Some(Ok(val)) => |val| Poll::Ready(Ok(val as usize)),
+			None => || opcode::Send::new(Fd(this.fd), buf.as_ptr(), buf.len() as u32)
+		})
+		.map_err(std::io::Error::other)
 	}
 
 	fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -169,34 +115,11 @@ impl AsyncWrite for TcpStream {
 	fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
 		self.closing = true;
 		let this = &mut *self;
-		let Some(rt) = this.rt.load() else {
-			return Poll::Ready(Err(std::io::Error::other(Error::NoRuntime)));
-		};
-
-		let id = this.resource.id;
-		match ready!(this.resource.ops.poll_submit::<{ Self::CLOSE_OP_ID }>(cx)) {
-			Some(Ok(_)) => Poll::Ready(Ok(())),
-			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
-			None => {
-				let entry = opcode::Close::new(Fd(this.fd)).build().user_data(
-					EventData {
-						resource: id,
-						id: Self::CLOSE_OP_ID,
-					}
-					.into(),
-				);
-
-				if let Err(err) = unsafe {
-					this.resource
-						.ops
-						.start_submit::<{ Self::CLOSE_OP_ID }>(rt, &entry, cx)
-				} {
-					Poll::Ready(Err(std::io::Error::other(err)))
-				} else {
-					Poll::Pending
-				}
-			}
-		}
+		poll_op_impl!(Self::CLOSE_OP_ID, this, cx, {
+			Some(Ok(val)) => |_| Poll::Ready(Ok(())),
+			None => || opcode::Close::new(Fd(this.fd))
+		})
+		.map_err(std::io::Error::other)
 	}
 }
 

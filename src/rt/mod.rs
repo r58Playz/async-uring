@@ -9,7 +9,7 @@ use std::{
 use inner::{RuntimeWorkerChannel, UringRuntimeWorker, WorkerMessage};
 use io_uring::{IoUring, cqueue, squeue};
 
-use crate::{net::tcp::TcpStream, nop::NopStream, Result};
+use crate::{Result, net::tcp::TcpStream, nop::NopStream};
 
 mod channel;
 mod completion;

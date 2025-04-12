@@ -240,3 +240,50 @@ impl<const SIZE: usize> Operations<SIZE> {
 		self.ops.get(id as usize)
 	}
 }
+
+/// SAFETY: make sure the sq entry stays alive
+macro_rules! poll_op_impl {
+	($id:expr, $this:expr, $cx:expr, {
+		Some(Ok(val)) => $ok:expr,
+		None => $new:expr
+	}) => {
+		(|| {
+			use std::task::Poll;
+			use $crate::{Error, rt::operation::EventData};
+
+			let Some(rt) = $this.rt.load() else {
+				return Poll::Ready(Err(Error::NoRuntime));
+			};
+
+			let id = $this.resource.id;
+			return match ready!($this.resource.ops.poll_submit::<{ $id }>($cx)) {
+				Some(Ok(val)) => ($ok)(val),
+				Some(Err(err)) => Poll::Ready(Err(err)),
+				None => {
+					if $this.closing {
+						Poll::Ready(Err(Error::ResourceClosing))
+					} else {
+						let entry = ($new)().build().user_data(
+							EventData {
+								resource: id,
+								id: $id,
+							}
+							.into(),
+						);
+
+						if let Err(err) =
+							// SAFETY: enforced by the caller
+							unsafe {
+								$this.resource.ops.start_submit::<{ $id }>(rt, &entry, $cx)
+							} {
+							Poll::Ready(Err(err))
+						} else {
+							Poll::Pending
+						}
+					}
+				}
+			};
+		})()
+	};
+}
+pub(crate) use poll_op_impl;
