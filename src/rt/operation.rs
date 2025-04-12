@@ -2,14 +2,12 @@ use std::{
 	io,
 	sync::{
 		Arc,
-		atomic::{AtomicBool, AtomicU64, Ordering},
+		atomic::{AtomicU64, Ordering},
 	},
 	task::{Context, Poll},
 };
 
 use diatomic_waker::DiatomicWaker;
-use event_listener::{Event, EventListener};
-use futures::FutureExt;
 use io_uring::squeue;
 
 use crate::Result;
@@ -43,101 +41,6 @@ impl From<u64> for EventData {
 			resource: top,
 			id: bottom,
 		}
-	}
-}
-
-struct OpsDisabledData {
-	disabled: AtomicBool,
-	waker: Event,
-}
-impl OpsDisabledData {
-	pub fn new() -> Arc<Self> {
-		Arc::new(Self {
-			disabled: AtomicBool::new(false),
-			waker: Event::new(),
-		})
-	}
-
-	pub fn set(&self, disabled: bool) {
-		self.disabled.store(disabled, Ordering::Release);
-		if !disabled {
-			self.waker.notify_additional(usize::MAX);
-		}
-	}
-}
-
-enum OpsDisabledState {
-	Disarmed,
-	Arming(EventListener),
-	Armed,
-}
-
-impl OpsDisabledState {
-	#[inline(always)]
-	fn disarm(&mut self) {
-		debug_assert!(matches!(self, Self::Armed));
-		*self = Self::Disarmed;
-	}
-
-	#[inline(always)]
-	fn poll_arm(&mut self, data: &OpsDisabledData, cx: &mut Context) -> Poll<()> {
-		macro_rules! arm {
-			() => {
-				if data.disabled.load(Ordering::Acquire) {
-					*self = Self::Arming(data.waker.listen());
-					Poll::Pending
-				} else {
-					*self = Self::Armed;
-					Poll::Ready(())
-				}
-			};
-		}
-
-		match self {
-			Self::Armed => Poll::Ready(()),
-			Self::Disarmed => arm!(),
-			Self::Arming(ev) => match ev.poll_unpin(cx) {
-				Poll::Ready(()) => arm!(),
-				Poll::Pending => Poll::Pending,
-			},
-		}
-	}
-}
-
-pub(crate) struct OpsDisabled {
-	handle: Arc<OpsDisabledData>,
-	state: OpsDisabledState,
-}
-
-impl Clone for OpsDisabled {
-	fn clone(&self) -> Self {
-		Self {
-			handle: self.handle.clone(),
-			state: OpsDisabledState::Disarmed,
-		}
-	}
-}
-
-impl OpsDisabled {
-	pub fn new() -> Self {
-		Self {
-			handle: OpsDisabledData::new(),
-			state: OpsDisabledState::Disarmed,
-		}
-	}
-
-	pub fn set(&self, disabled: bool) {
-		self.handle.set(disabled);
-	}
-
-	#[inline(always)]
-	pub fn poll_arm(&mut self, cx: &mut Context) -> Poll<()> {
-		self.state.poll_arm(&self.handle, cx)
-	}
-
-	#[inline(always)]
-	pub fn disarm(&mut self) {
-		self.state.disarm();
 	}
 }
 
@@ -335,13 +238,5 @@ impl<const SIZE: usize> Operations<SIZE> {
 
 	pub fn get(&self, id: u32) -> Option<&Operation<SIZE>> {
 		self.ops.get(id as usize)
-	}
-
-	pub fn inflight(&self) -> usize {
-		self.ops
-			.iter()
-			.map(Operation::state)
-			.filter(|x| matches!(x, OperationState::Waiting))
-			.count()
 	}
 }

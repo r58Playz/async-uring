@@ -1,11 +1,11 @@
 use std::{
-	os::fd::OwnedFd,
+	os::fd::{AsRawFd, OwnedFd, RawFd},
 	pin::Pin,
 	task::{Context, Poll, Waker},
 };
 
 use futures::{channel::oneshot, ready};
-use io_uring::{opcode, types::Fixed};
+use io_uring::{opcode, types::Fd};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
@@ -23,6 +23,8 @@ pub struct TcpStream {
 	resource: Resource,
 	sender: RuntimeWorkerChannel,
 
+	fd: RawFd,
+
 	closing: bool,
 }
 
@@ -38,6 +40,7 @@ impl TcpStream {
 	) -> Result<Self> {
 		std.set_nonblocking(true)?;
 		let fd = OwnedFd::from(std);
+		let raw = fd.as_raw_fd();
 
 		let (tx, rx) = oneshot::channel();
 
@@ -55,6 +58,7 @@ impl TcpStream {
 			rt,
 			resource,
 			sender,
+			fd: raw,
 
 			closing: false,
 		})
@@ -73,8 +77,7 @@ impl AsyncRead for TcpStream {
 		};
 
 		let id = this.resource.id;
-		let ops = ready!(this.resource.poll_ops(cx));
-		let ret = match ready!(ops.poll_submit::<{ Self::READ_OP_ID }>(cx)) {
+		match ready!(this.resource.ops.poll_submit::<{ Self::READ_OP_ID }>(cx)) {
 			Some(Ok(val)) => {
 				unsafe { buf.assume_init(val as usize) };
 				buf.advance(val as usize);
@@ -87,7 +90,7 @@ impl AsyncRead for TcpStream {
 				} else {
 					let uninit = unsafe { buf.unfilled_mut() };
 					let entry = opcode::Recv::new(
-						Fixed(id),
+						Fd(this.fd),
 						uninit.as_mut_ptr().cast::<u8>(),
 						uninit.len() as u32,
 					)
@@ -100,19 +103,18 @@ impl AsyncRead for TcpStream {
 						.into(),
 					);
 
-					if let Err(err) =
-						unsafe { ops.start_submit::<{ Self::READ_OP_ID }>(rt, &entry, cx) }
-					{
+					if let Err(err) = unsafe {
+						this.resource
+							.ops
+							.start_submit::<{ Self::READ_OP_ID }>(rt, &entry, cx)
+					} {
 						Poll::Ready(Err(std::io::Error::other(err)))
 					} else {
-						return Poll::Pending;
+						Poll::Pending
 					}
 				}
 			}
-		};
-
-		this.resource.disarm();
-		ret
+		}
 	}
 }
 
@@ -128,17 +130,14 @@ impl AsyncWrite for TcpStream {
 		};
 
 		let id = this.resource.id;
-		let ops = ready!(this.resource.poll_ops(cx));
-		let ret = match ready!(ops.poll_submit::<{ Self::WRITE_OP_ID }>(cx)) {
-			Some(Ok(val)) => {
-				Poll::Ready(Ok(val as usize))
-			}
+		match ready!(this.resource.ops.poll_submit::<{ Self::WRITE_OP_ID }>(cx)) {
+			Some(Ok(val)) => Poll::Ready(Ok(val as usize)),
 			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
 			None => {
 				if this.closing {
 					Poll::Ready(Err(std::io::Error::other(Error::ResourceClosing)))
 				} else {
-					let entry = opcode::Send::new(Fixed(id), buf.as_ptr(), buf.len() as u32)
+					let entry = opcode::Send::new(Fd(this.fd), buf.as_ptr(), buf.len() as u32)
 						.build()
 						.user_data(
 							EventData {
@@ -148,20 +147,18 @@ impl AsyncWrite for TcpStream {
 							.into(),
 						);
 
-					if let Err(err) =
-						unsafe { ops.start_submit::<{ Self::WRITE_OP_ID }>(rt, &entry, cx) }
-					{
+					if let Err(err) = unsafe {
+						this.resource
+							.ops
+							.start_submit::<{ Self::WRITE_OP_ID }>(rt, &entry, cx)
+					} {
 						Poll::Ready(Err(std::io::Error::other(err)))
 					} else {
-						// operation hasn't ended yet otherwise i would let it disarm
-						return Poll::Pending;
+						Poll::Pending
 					}
 				}
 			}
-		};
-
-		this.resource.disarm();
-		ret
+		}
 	}
 
 	fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -177,12 +174,11 @@ impl AsyncWrite for TcpStream {
 		};
 
 		let id = this.resource.id;
-		let ops = ready!(this.resource.poll_ops(cx));
-		let ret = match ready!(ops.poll_submit::<{ Self::CLOSE_OP_ID }>(cx)) {
+		match ready!(this.resource.ops.poll_submit::<{ Self::CLOSE_OP_ID }>(cx)) {
 			Some(Ok(_)) => Poll::Ready(Ok(())),
 			Some(Err(err)) => Poll::Ready(Err(std::io::Error::other(err))),
 			None => {
-				let entry = opcode::Close::new(Fixed(id)).build().user_data(
+				let entry = opcode::Close::new(Fd(this.fd)).build().user_data(
 					EventData {
 						resource: id,
 						id: Self::CLOSE_OP_ID,
@@ -190,18 +186,17 @@ impl AsyncWrite for TcpStream {
 					.into(),
 				);
 
-				if let Err(err) =
-					unsafe { ops.start_submit::<{ Self::CLOSE_OP_ID }>(rt, &entry, cx) }
-				{
+				if let Err(err) = unsafe {
+					this.resource
+						.ops
+						.start_submit::<{ Self::CLOSE_OP_ID }>(rt, &entry, cx)
+				} {
 					Poll::Ready(Err(std::io::Error::other(err)))
 				} else {
 					Poll::Pending
 				}
 			}
-		};
-
-		this.resource.disarm();
-		ret
+		}
 	}
 }
 

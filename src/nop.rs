@@ -1,6 +1,6 @@
 use std::{
 	pin::Pin,
-	task::{ready, Context, Poll, Waker},
+	task::{Context, Poll, Waker, ready},
 };
 
 use futures::{Stream, channel::oneshot};
@@ -56,8 +56,7 @@ impl Stream for NopStream {
 		};
 
 		let id = this.resource.id;
-		let ops = ready!(this.resource.poll_ops(cx));
-		let ret = match ready!(ops.poll_submit::<{ Self::NOP_OP_ID }>(cx)) {
+		match ready!(this.resource.ops.poll_submit::<{ Self::NOP_OP_ID }>(cx)) {
 			Some(Ok(val)) => Poll::Ready(Some(Ok(val))),
 			Some(Err(err)) => Poll::Ready(Some(Err(err))),
 			None => {
@@ -69,17 +68,17 @@ impl Stream for NopStream {
 					.into(),
 				);
 
-				if let Err(err) = unsafe { ops.start_submit::<{ Self::NOP_OP_ID }>(rt, &entry, cx) }
-				{
+				if let Err(err) = unsafe {
+					this.resource
+						.ops
+						.start_submit::<{ Self::NOP_OP_ID }>(rt, &entry, cx)
+				} {
 					Poll::Ready(Some(Err(err)))
 				} else {
 					Poll::Pending
 				}
 			}
-		};
-
-		this.resource.disarm();
-		ret
+		}
 	}
 }
 

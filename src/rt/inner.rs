@@ -10,10 +10,8 @@ use super::{
 	channel::{ChannelRecv, ChannelSend},
 	completion::CqueueStream,
 	deps::AsyncFd,
-	operation::{EventData, Operations, OpsDisabled},
-	resource::{
-		PendingResize, RegisterResourceSender, Resource, WorkerResource, WorkerResourceSlab,
-	},
+	operation::{EventData, Operations},
+	resource::{RegisterResourceSender, Resource, WorkerResource, WorkerResourceSlab},
 	select::{PollNext, select_with_strategy},
 };
 
@@ -71,9 +69,7 @@ impl UringRuntimeWorker {
 			},
 		);
 
-		let ops_disabled = OpsDisabled::new();
-		let mut resources = WorkerResourceSlab::new(data)?;
-		let mut pending_resource_resize: Option<PendingResize> = None;
+		let mut resources = WorkerResourceSlab::new();
 
 		while let Some(evt) = combined.next().await.transpose()? {
 			match evt {
@@ -88,30 +84,6 @@ impl UringRuntimeWorker {
 					} else {
 						panic!("dropped message {info:?}");
 					}
-
-					if let Some(PendingResize {
-						worker,
-						complete,
-						new_size,
-					}) = pending_resource_resize.take_if(|_| resources.inflight_ops() == 0)
-					{
-						resources.resize(new_size)?;
-
-						let ops = worker.ops.clone();
-
-						match resources.insert(worker) {
-							Ok(id) => {
-								let resource = Resource::new(id, ops_disabled.clone(), ops);
-								let _ = complete.send(Ok(resource));
-							}
-							Err(err) => {
-								let _ = complete.send(Err(err));
-							}
-						}
-
-						combined.get_state_mut().disable_actor = false;
-						ops_disabled.set(false);
-					}
 				}
 				WorkerMessage::RegisterResource { ops, fd, complete } => {
 					let worker = WorkerResource {
@@ -119,24 +91,9 @@ impl UringRuntimeWorker {
 						fd,
 					};
 
-					if let Some(new_size) = resources.pending_resize() {
-						if resources.inflight_ops() != 0 {
-							let _ = pending_resource_resize.insert(PendingResize {
-								worker,
-								complete,
-								new_size,
-							});
-							combined.get_state_mut().disable_actor = true;
-							ops_disabled.set(true);
-
-							continue;
-						}
-						resources.resize(new_size)?;
-					}
-
 					match resources.insert(worker) {
 						Ok(id) => {
-							let resource = Resource::new(id, ops_disabled.clone(), ops);
+							let resource = Resource::new(id, ops);
 							let _ = complete.send(Ok(resource));
 						}
 						Err(err) => {
@@ -145,7 +102,7 @@ impl UringRuntimeWorker {
 					}
 				}
 				WorkerMessage::CloseResource { id, complete } => {
-					let _ = resources.remove(id)?;
+					let _ = resources.remove(id);
 					complete.wake();
 				}
 				WorkerMessage::Stop => break,
