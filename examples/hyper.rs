@@ -5,6 +5,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::{TokioIo, TokioTimer};
+use rand::{rng, seq::IndexedRandom};
 use tokio::{net::TcpListener, task::coop::unconstrained};
 
 #[tokio::main(flavor = "current_thread")]
@@ -33,8 +34,17 @@ async fn main() -> Result<()> {
 	Ok(())
 }
 
+const FORTUNES: [&str; 4] = [
+	"Fortune: you will get stuck debugging lost wakers",
+	"Fortune: you'll have a good day",
+	"Fortune: the next distro update will break a random feature",
+	"Hello World!",
+];
+
 async fn handle(
 	_: Request<impl hyper::body::Body>,
 ) -> std::result::Result<Response<Full<Bytes>>, Infallible> {
-	Ok(Response::new(Full::new(Bytes::from("Hello World!"))))
+	Ok(Response::new(Full::new(Bytes::from(
+		*FORTUNES.choose(&mut rng()).unwrap(),
+	))))
 }
