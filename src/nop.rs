@@ -56,7 +56,7 @@ impl Stream for NopStream {
 		let this = &mut *self;
 		poll_op_impl!(Self::NOP_OP_ID, this, cx, {
 			Some(Ok(val)) => |val| Poll::Ready(Ok(val)),
-			None => opcode::Nop::new
+			None => || Ok(opcode::Nop::new())
 		})
 		.map(Some)
 	}

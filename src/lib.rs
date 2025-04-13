@@ -12,6 +12,8 @@ pub enum Error {
 
 	#[error("Too many resources registered")]
 	TooManyResources,
+	#[error("Buffer too large")]
+	BufferTooLarge,
 	#[error("Resource is closing")]
 	ResourceClosing,
 	#[error("Runtime is dead or unreachable")]

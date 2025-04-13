@@ -82,11 +82,11 @@ impl AsyncRead for TcpStream {
 			None => || {
 				// SAFETY: we send it straight to the kernel and it doesn't de-initialize anything
 				let uninit = unsafe { buf.unfilled_mut() };
-				opcode::Recv::new(
+				Ok(opcode::Recv::new(
 					Fd(this.fd),
 					uninit.as_mut_ptr().cast::<u8>(),
-					uninit.len() as u32,
-				)
+					uninit.len().try_into().map_err(|_| Error::BufferTooLarge)?,
+				))
 			}
 		})
 		.map_err(std::io::Error::other)
@@ -102,7 +102,7 @@ impl AsyncWrite for TcpStream {
 		let this = &mut *self;
 		poll_op_impl!(Self::WRITE_OP_ID, this, cx, {
 			Some(Ok(val)) => |val| Poll::Ready(Ok(val as usize)),
-			None => || opcode::Send::new(Fd(this.fd), buf.as_ptr(), buf.len() as u32)
+			None => || Ok(opcode::Send::new(Fd(this.fd), buf.as_ptr(), buf.len().try_into().map_err(|_| Error::BufferTooLarge)?))
 		})
 		.map_err(std::io::Error::other)
 	}
@@ -117,7 +117,7 @@ impl AsyncWrite for TcpStream {
 		let this = &mut *self;
 		poll_op_impl!(Self::CLOSE_OP_ID, this, cx, {
 			Some(Ok(val)) => |_| Poll::Ready(Ok(())),
-			None => || opcode::Close::new(Fd(this.fd))
+			None => || Ok(opcode::Close::new(Fd(this.fd)))
 		})
 		.map_err(std::io::Error::other)
 	}

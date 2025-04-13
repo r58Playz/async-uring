@@ -263,7 +263,13 @@ macro_rules! poll_op_impl {
 					if $this.closing {
 						Poll::Ready(Err(Error::ResourceClosing))
 					} else {
-						let entry = ($new)().build().user_data(
+						let val = ($new)();
+						let val = match val {
+							Ok(val) => val,
+							Err(err) => return Poll::Ready(Err(err)),
+						};
+
+						let entry = val.build().user_data(
 							EventData {
 								resource: id,
 								id: $id,
