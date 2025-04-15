@@ -1,5 +1,6 @@
 use std::{
 	io,
+	mem::ManuallyDrop,
 	sync::{
 		Arc,
 		atomic::{AtomicU64, Ordering},
@@ -9,10 +10,11 @@ use std::{
 
 use diatomic_waker::DiatomicWaker;
 use io_uring::squeue;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::Result;
 
-use super::UringData;
+use super::{UringData, resource::Resource};
 
 #[derive(Debug)]
 pub(crate) struct EventData {
@@ -47,20 +49,20 @@ impl From<u64> for EventData {
 #[derive(Debug)]
 #[repr(align(4))]
 pub(crate) struct OperationCancelData {
-	wake: bool,
+	pub wake: bool,
+	pub buf: Vec<u8>
 }
 
-#[derive(Debug)]
 pub(crate) enum OperationState {
 	Waiting,
-	Cancelled(Box<OperationCancelData>),
+	Cancelled(ManuallyDrop<Box<OperationCancelData>>),
 	Finished(i32),
 }
 
 impl OperationState {
 	const TAG_SIZE: u64 = 0b11;
 
-	pub fn cancel_data(self) -> Option<Box<OperationCancelData>> {
+	pub fn cancel_data(self) -> Option<ManuallyDrop<Box<OperationCancelData>>> {
 		match self {
 			Self::Cancelled(x) => Some(x),
 			Self::Waiting | Self::Finished(_) => None,
@@ -79,7 +81,9 @@ impl From<u64> for OperationState {
 			#[expect(clippy::cast_possible_truncation)]
 			// SAFETY: data is only ever an 8 byte aligned pointer
 			3 => Self::Cancelled(unsafe {
-				Box::from_raw(std::ptr::null_mut::<OperationCancelData>().with_addr(data as usize))
+				ManuallyDrop::new(Box::from_raw(
+					std::ptr::null_mut::<OperationCancelData>().with_addr(data as usize),
+				))
 			}),
 			_ => unreachable!("{value:08X}"),
 		}
@@ -92,7 +96,10 @@ impl From<OperationState> for u64 {
 			// casted value is immediately casted back to i32
 			#[expect(clippy::cast_sign_loss)]
 			OperationState::Finished(val) => ((val as u64) << 3, 2u64),
-			OperationState::Cancelled(cleanup) => (Box::into_raw(cleanup).addr() as u64, 3u64),
+			OperationState::Cancelled(cleanup) => (
+				Box::into_raw(ManuallyDrop::into_inner(cleanup)).addr() as u64,
+				3u64,
+			),
 		};
 
 		debug_assert_eq!(tag & !OperationState::TAG_SIZE, 0);
@@ -130,6 +137,7 @@ impl<const SIZE: usize> Operation<SIZE> {
 		self.state
 			.store(OperationState::Waiting.into(), Ordering::Release);
 
+		// SAFETY: the worker never registers a waker
 		unsafe { self.waker.register(cx.waker()) };
 	}
 
@@ -150,12 +158,42 @@ impl<const SIZE: usize> Operation<SIZE> {
 		}
 
 		// drop anything that was needed for the op to complete safely
-		drop(cancel);
+		if let Some(mut cancel) = cancel {
+			unsafe { ManuallyDrop::drop(&mut cancel) };
+		}
 	}
 
 	#[inline(always)]
 	pub fn state(&self) -> OperationState {
 		self.state.load(Ordering::Acquire).into()
+	}
+
+	pub fn cancel(&self, cancel_data: OperationCancelData) -> bool {
+		let cancel_data = ManuallyDrop::new(Box::new(cancel_data));
+		let our_state = OperationState::Cancelled(cancel_data).into();
+		match self
+			.state
+			.compare_exchange(
+				OperationState::Waiting.into(),
+				our_state,
+				Ordering::AcqRel,
+				Ordering::Acquire,
+			)
+			.unwrap_or_else(|x| x)
+			.into()
+		{
+			OperationState::Waiting => {
+				// we were waiting, task cancelled
+				true
+			}
+			OperationState::Finished(_) | OperationState::Cancelled(_) => {
+				// we were already done with the op or were already cancelled, drop our state
+				unsafe {
+					ManuallyDrop::drop(&mut OperationState::from(our_state).cancel_data().unwrap())
+				};
+				false
+			}
+		}
 	}
 }
 
@@ -218,21 +256,40 @@ impl<const SIZE: usize> Operations<SIZE> {
 		match *submission {
 			OperationPollState::Idle => Poll::Ready(None),
 			OperationPollState::Submitting => {
-				if let OperationState::Finished(ret) = op.state() {
-					*submission = OperationPollState::Idle;
+				match op.state() {
+					OperationState::Finished(ret) => {
+						*submission = OperationPollState::Idle;
 
-					if ret < 0 {
-						Poll::Ready(Some(Err(io::Error::from_raw_os_error(-ret).into())))
-					} else {
-						// we already check if it's below 0
-						#[expect(clippy::cast_sign_loss)]
-						Poll::Ready(Some(Ok(ret as u32)))
+						if ret < 0 {
+							Poll::Ready(Some(Err(io::Error::from_raw_os_error(-ret).into())))
+						} else {
+							// we already check if it's below 0
+							#[expect(clippy::cast_sign_loss)]
+							Poll::Ready(Some(Ok(ret as u32)))
+						}
 					}
-				} else {
-					op.register(cx);
-					Poll::Pending
+					OperationState::Waiting => {
+						op.register(cx);
+						Poll::Pending
+					}
+					OperationState::Cancelled(_) => {
+						todo!("implement polling an operation that was cancelled");
+					}
 				}
 			}
+		}
+	}
+
+	// this isn't possible to constify without generic_const_exprs
+	pub fn try_cancel(&mut self, id: u32, data: OperationCancelData) -> bool {
+		let op = &self.ops[id as usize];
+		let submission = &mut self.submissions[id as usize];
+
+		if op.cancel(data) {
+			*submission = OperationPollState::Idle;
+			true
+		} else {
+			false
 		}
 	}
 
@@ -293,3 +350,10 @@ macro_rules! poll_op_impl {
 	};
 }
 pub(crate) use poll_op_impl;
+
+pub(crate) trait ProtectedOps: AsyncRead + AsyncWrite {
+	const READ_OP_ID: u32;
+	const WRITE_OP_ID: u32;
+
+	fn get_resource(&mut self) -> &mut Resource;
+}

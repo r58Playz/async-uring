@@ -1,3 +1,4 @@
+pub mod compat;
 pub mod net;
 pub mod nop;
 pub mod rt;

@@ -13,7 +13,7 @@ use crate::{
 	rt::{
 		UringDataHandle,
 		inner::{RuntimeWorkerChannel, WorkerMessage},
-		operation::{Operations, poll_op_impl},
+		operation::{Operations, ProtectedOps, poll_op_impl},
 		resource::Resource,
 	},
 };
@@ -26,6 +26,15 @@ pub struct TcpStream {
 	fd: RawFd,
 
 	closing: bool,
+}
+
+impl ProtectedOps for TcpStream {
+	const READ_OP_ID: u32 = Self::READ_OP_ID;
+	const WRITE_OP_ID: u32 = Self::WRITE_OP_ID;
+
+	fn get_resource(&mut self) -> &mut Resource {
+		&mut self.resource
+	}
 }
 
 impl TcpStream {
