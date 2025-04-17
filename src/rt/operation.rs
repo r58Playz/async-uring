@@ -50,7 +50,7 @@ impl From<u64> for EventData {
 #[repr(align(4))]
 pub(crate) struct OperationCancelData {
 	pub wake: bool,
-	pub buf: Vec<u8>
+	pub buf: Vec<u8>,
 }
 
 pub(crate) enum OperationState {
@@ -129,16 +129,25 @@ impl<const SIZE: usize> Operation<SIZE> {
 	}
 
 	#[inline(always)]
-	pub fn register(&self, cx: &mut Context<'_>) {
-		debug_assert!(matches!(
-			self.state(),
-			OperationState::Finished(_) | OperationState::Waiting
-		));
-		self.state
-			.store(OperationState::Waiting.into(), Ordering::Release);
-
+	pub fn register(
+		&self,
+		last_state: OperationState,
+		cx: &mut Context<'_>,
+	) -> std::result::Result<(), OperationState> {
 		// SAFETY: the worker never registers a waker
 		unsafe { self.waker.register(cx.waker()) };
+
+		if let Err(val) = self.state.compare_exchange(
+			last_state.into(),
+			OperationState::Waiting.into(),
+			Ordering::AcqRel,
+			Ordering::Acquire,
+		) {
+			unsafe { self.waker.unregister(); };
+			return Err(val.into());
+		}
+
+		Ok(())
 	}
 
 	#[inline(always)]
@@ -240,7 +249,11 @@ impl<const SIZE: usize> Operations<SIZE> {
 		let op = &self.ops[ID as usize];
 		let submission = &mut self.submissions[ID as usize];
 
-		op.register(cx);
+		let mut state = op.state();
+		while let Err(err) = op.register(state, cx) {
+			state = err;
+		}
+
 		// SAFETY: enforced by caller
 		unsafe { rt.submit(entry)? };
 		*submission = OperationPollState::Submitting;
@@ -253,30 +266,41 @@ impl<const SIZE: usize> Operations<SIZE> {
 		let op = &self.ops[ID as usize];
 		let submission = &mut self.submissions[ID as usize];
 
+		macro_rules! finish {
+			($ret:expr) => {
+				*submission = OperationPollState::Idle;
+
+				if $ret < 0 {
+					return Poll::Ready(Some(Err(io::Error::from_raw_os_error(-$ret).into())));
+				} else {
+					// we already check if it's below 0
+					#[expect(clippy::cast_sign_loss)]
+					return Poll::Ready(Some(Ok($ret as u32)));
+				}
+			};
+		}
+
 		match *submission {
 			OperationPollState::Idle => Poll::Ready(None),
-			OperationPollState::Submitting => {
-				match op.state() {
-					OperationState::Finished(ret) => {
-						*submission = OperationPollState::Idle;
-
-						if ret < 0 {
-							Poll::Ready(Some(Err(io::Error::from_raw_os_error(-ret).into())))
-						} else {
-							// we already check if it's below 0
-							#[expect(clippy::cast_sign_loss)]
-							Poll::Ready(Some(Ok(ret as u32)))
+			OperationPollState::Submitting => match op.state() {
+				OperationState::Finished(ret) => {
+					finish!(ret);
+				}
+				OperationState::Waiting => {
+					match op.register(OperationState::Waiting, cx) {
+						Ok(()) | Err(OperationState::Waiting) => Poll::Pending,
+						Err(OperationState::Finished(ret)) => {
+							finish!(ret);
+						}
+						Err(OperationState::Cancelled(_)) => {
+							todo!();
 						}
 					}
-					OperationState::Waiting => {
-						op.register(cx);
-						Poll::Pending
-					}
-					OperationState::Cancelled(_) => {
-						todo!("implement polling an operation that was cancelled");
-					}
 				}
-			}
+				OperationState::Cancelled(_) => {
+					todo!("implement polling an operation that was cancelled");
+				}
+			},
 		}
 	}
 
