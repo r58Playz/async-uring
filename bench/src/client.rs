@@ -14,19 +14,18 @@ use tokio::{
 
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+async_uring_bench::tokio_main! {
 	let (rt, fut) = UringRuntime::builder::<TokioAsyncFd>().build()?;
 
 	tokio::spawn(unconstrained(fut));
 
-	let addr = SocketAddr::from_str(&args().nth(1).unwrap()).unwrap();
-	let socket_cnt = usize::from_str(&args().nth(2).unwrap()).unwrap();
+	let addr = SocketAddr::from_str(&args().nth(2).unwrap()).unwrap();
+	let socket_cnt = usize::from_str(&args().nth(3).unwrap()).unwrap();
 	let size = args()
-		.nth(3)
+		.nth(4)
 		.map_or(16 * 1024, |x| usize::from_str(&x).unwrap());
 	let duration = args()
-		.nth(4)
+		.nth(5)
 		.map(|x| Duration::from_secs(u64::from_str(&x).unwrap()));
 
 	let mut sockets = Vec::with_capacity(socket_cnt);

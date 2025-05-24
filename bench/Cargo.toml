@@ -1,0 +1,32 @@
+[package]
+name = "async-uring-bench"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "async_uring_bench"
+crate-type = ["lib"]
+
+[[bin]]
+name = "tokio_server"
+path = "src/tokio_server.rs"
+[[bin]]
+name = "tokio_uring_server"
+path = "src/tokio_uring_server.rs"
+[[bin]]
+name = "monoio_server"
+path = "src/monoio_server.rs"
+[[bin]]
+name = "async_uring_server"
+path = "src/async_uring_server.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
+
+[dependencies]
+anyhow = "1.0.98"
+async-uring = { version = "0.1.0", path = ".." }
+monoio = "0.2.4"
+tokio = { version = "1.44.1", features = ["rt", "rt-multi-thread", "macros", "net", "time", "io-util"], default-features = false }
+tokio-uring = "0.5.0"
