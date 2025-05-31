@@ -43,7 +43,7 @@ impl<T: Unpin + ProtectedOps> Copying<T> {
 	}
 }
 
-impl<T: Unpin + ProtectedOps> AsyncRead for Copying<T> {
+impl<T: Unpin + AsyncRead + ProtectedOps> AsyncRead for Copying<T> {
 	fn poll_read(
 		mut self: Pin<&mut Self>,
 		cx: &mut Context<'_>,
@@ -68,7 +68,7 @@ impl<T: Unpin + ProtectedOps> AsyncRead for Copying<T> {
 	}
 }
 
-impl<T: Unpin + ProtectedOps> AsyncWrite for Copying<T> {
+impl<T: Unpin + AsyncWrite + ProtectedOps> AsyncWrite for Copying<T> {
 	fn poll_write(
 		mut self: Pin<&mut Self>,
 		cx: &mut Context<'_>,
@@ -99,24 +99,24 @@ impl<T: Unpin + ProtectedOps> AsyncWrite for Copying<T> {
 	}
 }
 
+macro_rules! try_cancel {
+	($res:ident, $id:expr, $buf:expr) => {
+		$res.ops.try_cancel(
+			$id,
+			OperationCancelData {
+				wake: false,
+				buf: std::mem::take(&mut $buf),
+			},
+		);
+	};
+}
+
 impl<T: Unpin + ProtectedOps> Drop for Copying<T> {
 	fn drop(&mut self) {
 		if let Some(mut inner) = self.inner.take() {
 			let res = inner.get_resource();
-			res.ops.try_cancel(
-				T::READ_OP_ID,
-				OperationCancelData {
-					wake: false,
-					buf: std::mem::take(&mut self.read_buf),
-				},
-			);
-			res.ops.try_cancel(
-				T::WRITE_OP_ID,
-				OperationCancelData {
-					wake: false,
-					buf: std::mem::take(&mut self.write_buf),
-				},
-			);
+			try_cancel!(res, T::READ_OP_ID, self.read_buf);
+			try_cancel!(res, T::WRITE_OP_ID, self.write_buf);
 		}
 	}
 }

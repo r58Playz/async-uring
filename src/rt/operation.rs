@@ -10,7 +10,6 @@ use std::{
 
 use diatomic_waker::DiatomicWaker;
 use io_uring::squeue;
-use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::Result;
 
@@ -143,7 +142,9 @@ impl<const SIZE: usize> Operation<SIZE> {
 			Ordering::AcqRel,
 			Ordering::Acquire,
 		) {
-			unsafe { self.waker.unregister(); };
+			unsafe {
+				self.waker.unregister();
+			};
 			return Err(val.into());
 		}
 
@@ -286,17 +287,15 @@ impl<const SIZE: usize> Operations<SIZE> {
 				OperationState::Finished(ret) => {
 					finish!(ret);
 				}
-				OperationState::Waiting => {
-					match op.register(OperationState::Waiting, cx) {
-						Ok(()) | Err(OperationState::Waiting) => Poll::Pending,
-						Err(OperationState::Finished(ret)) => {
-							finish!(ret);
-						}
-						Err(OperationState::Cancelled(_)) => {
-							todo!();
-						}
+				OperationState::Waiting => match op.register(OperationState::Waiting, cx) {
+					Ok(()) | Err(OperationState::Waiting) => Poll::Pending,
+					Err(OperationState::Finished(ret)) => {
+						finish!(ret);
 					}
-				}
+					Err(OperationState::Cancelled(_)) => {
+						todo!();
+					}
+				},
 				OperationState::Cancelled(_) => {
 					todo!("implement polling an operation that was cancelled");
 				}
@@ -341,7 +340,7 @@ macro_rules! poll_op_impl {
 				Some(Ok(val)) => ($ok)(val),
 				Some(Err(err)) => Poll::Ready(Err(err)),
 				None => {
-					if $this.closing {
+					if $this.resource.closing() {
 						Poll::Ready(Err(Error::ResourceClosing))
 					} else {
 						let val = ($new)();
@@ -375,9 +374,8 @@ macro_rules! poll_op_impl {
 }
 pub(crate) use poll_op_impl;
 
-pub(crate) trait ProtectedOps: AsyncRead + AsyncWrite {
+pub(crate) trait ProtectedOps {
+	fn get_resource(&mut self) -> &mut Resource;
 	const READ_OP_ID: u32;
 	const WRITE_OP_ID: u32;
-
-	fn get_resource(&mut self) -> &mut Resource;
 }

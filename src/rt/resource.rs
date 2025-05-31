@@ -1,4 +1,10 @@
-use std::os::fd::OwnedFd;
+use std::{
+	os::fd::OwnedFd,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
+};
 
 use futures::channel::oneshot;
 use slab::Slab;
@@ -40,13 +46,27 @@ pub(super) struct WorkerResource {
 
 pub(super) type RegisterResourceSender = oneshot::Sender<Result<Resource>>;
 
+#[derive(Clone)]
 pub(crate) struct Resource {
 	pub id: u32,
 	pub ops: Operations,
+	closing: Arc<AtomicBool>,
 }
 
 impl Resource {
 	pub(super) fn new(id: u32, ops: Operations) -> Self {
-		Self { id, ops }
+		Self {
+			id,
+			ops,
+			closing: Arc::new(AtomicBool::new(false)),
+		}
+	}
+
+	pub fn closing(&self) -> bool {
+		self.closing.load(Ordering::Acquire)
+	}
+
+	pub fn set_closing(&self) {
+		self.closing.store(true, Ordering::Release);
 	}
 }

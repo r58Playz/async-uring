@@ -20,8 +20,6 @@ pub struct NopStream {
 	rt: UringDataHandle,
 	resource: Resource,
 	sender: RuntimeWorkerChannel,
-
-	closing: bool,
 }
 
 impl NopStream {
@@ -44,7 +42,6 @@ impl NopStream {
 			rt,
 			resource,
 			sender,
-			closing: false,
 		})
 	}
 }
@@ -64,6 +61,7 @@ impl Stream for NopStream {
 
 impl Drop for NopStream {
 	fn drop(&mut self) {
+		self.resource.set_closing();
 		let _ = self.sender.send(WorkerMessage::CloseResource {
 			id: self.resource.id,
 			complete: Waker::noop().clone(),
