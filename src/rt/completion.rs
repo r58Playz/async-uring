@@ -1,7 +1,7 @@
 use std::{
 	os::fd::AsRawFd,
 	pin::Pin,
-	task::{Context, Poll, ready},
+	task::{Context, Poll},
 };
 
 use futures::Stream;
@@ -33,13 +33,15 @@ impl<Fd: AsyncFd> Stream for CqueueStream<'_, Fd> {
 	type Item = crate::Result<cqueue::Entry>;
 
 	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-		if let Some(entry) = self.cqueue.next() {
-			Poll::Ready(Some(Ok(entry)))
-		} else {
-			ready!(self.fd.poll_read_ready(cx))?;
-			self.cqueue.sync();
-
-			self.poll_next(cx)
-		}
+		let this = &mut *self;
+		this.fd
+			.poll_read_ready(cx, || {
+				this.cqueue.sync();
+				this.cqueue
+					.next()
+					.ok_or(std::io::ErrorKind::WouldBlock.into())
+			})
+			.map_err(Into::into)
+			.map(Some)
 	}
 }

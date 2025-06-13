@@ -7,5 +7,9 @@ use std::{
 pub trait AsyncFd: Sync + Send + Sized + Unpin {
 	fn new(fd: RawFd) -> Result<Self>;
 
-	fn poll_read_ready(&self, cx: &mut Context) -> Poll<Result<()>>;
+	fn poll_read_ready<T>(
+		&self,
+		cx: &mut Context,
+		callback: impl FnMut() -> Result<T>,
+	) -> Poll<Result<T>>;
 }
