@@ -25,7 +25,7 @@ const CLOSE_OP_ID: u32 = 2;
 macro_rules! poll_read {
     ($self:ident, $cx:ident, $buf:ident) => {
 		let this = &mut *$self;
-		return poll_op_impl!(READ_OP_ID, this, $cx, {
+		return poll_op_impl!(READ_OP_ID, this, $cx, false, {
 			Some(Ok(val)) => |val| {
 				// SAFETY: kernel just initialized these bytes in the read op
 				unsafe { $buf.assume_init(val as usize) };
@@ -49,7 +49,7 @@ macro_rules! poll_read {
 macro_rules! poll_write {
     ($self:ident, $cx:ident, $buf:ident) => {
 		let this = &mut *$self;
-		return poll_op_impl!(WRITE_OP_ID, this, $cx, {
+		return poll_op_impl!(WRITE_OP_ID, this, $cx, false, {
 			Some(Ok(val)) => |val| Poll::Ready(Ok(val as usize)),
 			None => || Ok(opcode::Send::new(Fd(this.fd), $buf.as_ptr(), $buf.len().try_into().map_err(|_| Error::BufferTooLarge)?))
 		})
@@ -61,7 +61,7 @@ macro_rules! poll_shutdown {
     ($self:ident, $cx: ident) => {
 		$self.resource.set_closing();
 		let this = &mut *$self;
-		return poll_op_impl!(CLOSE_OP_ID, this, $cx, {
+		return poll_op_impl!(CLOSE_OP_ID, this, $cx, true, {
 			Some(Ok(val)) => |_| Poll::Ready(Ok(())),
 			None => || Ok(opcode::Close::new(Fd(this.fd)))
 		})

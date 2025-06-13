@@ -1,4 +1,8 @@
-use std::{os::fd::OwnedFd, task::Waker};
+use std::{
+	os::fd::{IntoRawFd, OwnedFd},
+	sync::{atomic::AtomicBool, Arc},
+	task::Waker,
+};
 
 use futures::{StreamExt, TryStreamExt};
 use io_uring::cqueue;
@@ -86,14 +90,16 @@ impl UringRuntimeWorker {
 					}
 				}
 				WorkerMessage::RegisterResource { ops, fd, complete } => {
+					let closing = Arc::new(AtomicBool::new(false));
 					let worker = WorkerResource {
 						ops: ops.clone(),
 						fd,
+						closing: closing.clone(),
 					};
 
 					match resources.insert(worker) {
 						Ok(id) => {
-							let resource = Resource::new(id, ops);
+							let resource = Resource::new(id, ops, closing);
 							let _ = complete.send(Ok(resource));
 						}
 						Err(err) => {
@@ -102,7 +108,13 @@ impl UringRuntimeWorker {
 					}
 				}
 				WorkerMessage::CloseResource { id, complete } => {
-					let _ = resources.remove(id);
+					let val = resources.remove(id);
+					if let Some(mut val) = val
+						&& val.closing() && let Some(fd) = val.fd.take()
+					{
+						// uring already closed the fd
+						let _ = fd.into_raw_fd();
+					}
 					complete.wake();
 				}
 				WorkerMessage::Stop => break,

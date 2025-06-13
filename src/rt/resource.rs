@@ -42,6 +42,13 @@ pub(super) struct WorkerResource {
 	#[expect(dead_code)]
 	pub fd: Option<OwnedFd>,
 	pub ops: Operations,
+	pub closing: Arc<AtomicBool>,
+}
+
+impl WorkerResource {
+	pub fn closing(&self) -> bool {
+		self.closing.load(Ordering::Acquire)
+	}
 }
 
 pub(super) type RegisterResourceSender = oneshot::Sender<Result<Resource>>;
@@ -54,12 +61,8 @@ pub(crate) struct Resource {
 }
 
 impl Resource {
-	pub(super) fn new(id: u32, ops: Operations) -> Self {
-		Self {
-			id,
-			ops,
-			closing: Arc::new(AtomicBool::new(false)),
-		}
+	pub(super) fn new(id: u32, ops: Operations, closing: Arc<AtomicBool>) -> Self {
+		Self { id, ops, closing }
 	}
 
 	pub fn closing(&self) -> bool {

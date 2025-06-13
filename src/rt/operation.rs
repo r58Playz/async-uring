@@ -323,7 +323,7 @@ impl<const SIZE: usize> Operations<SIZE> {
 
 /// SAFETY: make sure the sq entry stays alive
 macro_rules! poll_op_impl {
-	($id:expr, $this:expr, $cx:expr, {
+	($id:expr, $this:expr, $cx:expr, $ignore_closing:expr, {
 		Some(Ok(val)) => $ok:expr,
 		None => $new:expr
 	}) => {
@@ -340,7 +340,7 @@ macro_rules! poll_op_impl {
 				Some(Ok(val)) => ($ok)(val),
 				Some(Err(err)) => Poll::Ready(Err(err)),
 				None => {
-					if $this.resource.closing() {
+					if !$ignore_closing && $this.resource.closing() {
 						Poll::Ready(Err(Error::ResourceClosing))
 					} else {
 						let val = ($new)();

@@ -51,7 +51,7 @@ impl Stream for NopStream {
 
 	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
 		let this = &mut *self;
-		poll_op_impl!(Self::NOP_OP_ID, this, cx, {
+		poll_op_impl!(Self::NOP_OP_ID, this, cx, false, {
 			Some(Ok(val)) => |val| Poll::Ready(Ok(val)),
 			None => || Ok(opcode::Nop::new())
 		})

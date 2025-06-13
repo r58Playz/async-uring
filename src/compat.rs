@@ -33,6 +33,14 @@ pub struct Copying<T: Unpin + ProtectedOps> {
 
 #[expect(private_bounds)]
 impl<T: Unpin + ProtectedOps> Copying<T> {
+	pub fn new(val: T) -> Self {
+		Self {
+			inner: Some(val),
+			read_buf: Vec::new(),
+			write_buf: Vec::new(),
+		}
+	}
+
 	/// Disable copying data into buffers.
 	///
 	/// # Safety
@@ -55,13 +63,16 @@ impl<T: Unpin + AsyncRead + ProtectedOps> AsyncRead for Copying<T> {
 		let unfilled = unsafe { buf.unfilled_mut() };
 		this.read_buf.reserve(unfilled.len());
 
-		let mut inner_buf = ReadBuf::new(&mut this.read_buf);
+		let mut inner_buf = ReadBuf::uninit(this.read_buf.spare_capacity_mut());
 		ready!(Pin::new(this.inner.as_mut().unwrap()).poll_read(cx, &mut inner_buf))?;
 
 		write_copy_of_slice(
 			&mut unfilled[0..inner_buf.filled().len()],
 			inner_buf.filled(),
 		);
+		unsafe {
+			buf.assume_init(inner_buf.filled().len());
+		}
 		buf.advance(inner_buf.filled().len());
 
 		Poll::Ready(Ok(()))
@@ -76,7 +87,7 @@ impl<T: Unpin + AsyncWrite + ProtectedOps> AsyncWrite for Copying<T> {
 	) -> Poll<Result<usize, std::io::Error>> {
 		let this = &mut *self;
 		this.write_buf.reserve(buf.len());
-		this.write_buf.copy_from_slice(buf);
+		this.write_buf.extend_from_slice(buf);
 
 		let ret = ready!(Pin::new(this.inner.as_mut().unwrap()).poll_write(cx, &this.write_buf));
 
