@@ -53,14 +53,14 @@ impl WorkerResource {
 pub(super) type RegisterResourceSender = oneshot::Sender<Result<Resource>>;
 
 #[derive(Clone)]
-pub(crate) struct Resource {
+pub(crate) struct Resource<const SIZE: usize = 4> {
 	pub id: u32,
-	pub ops: Operations,
+	pub ops: Operations<SIZE>,
 	closing: Arc<AtomicBool>,
 }
 
-impl Resource {
-	pub(super) fn new(id: u32, ops: Operations, closing: Arc<AtomicBool>) -> Self {
+impl<const SIZE: usize> Resource<SIZE> {
+	pub(super) fn new(id: u32, ops: Operations<SIZE>, closing: Arc<AtomicBool>) -> Self {
 		Self { id, ops, closing }
 	}
 

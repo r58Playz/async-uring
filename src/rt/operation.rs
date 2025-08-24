@@ -78,8 +78,8 @@ impl From<u64> for OperationState {
 			#[expect(clippy::cast_possible_truncation)]
 			2 => Self::Finished((data >> 3) as i32),
 			#[expect(clippy::cast_possible_truncation)]
-			// SAFETY: data is only ever an 8 byte aligned pointer
 			3 => {
+				// SAFETY: data is only ever an 8 byte aligned pointer
 				Self::Cancelled(unsafe {
 					ManuallyDrop::new(Box::from_raw(
 						std::ptr::null_mut::<OperationCancelData>().with_addr(data as usize),
@@ -327,10 +327,6 @@ impl<const SIZE: usize> Operations<SIZE> {
 
 	pub fn get(&self, id: u32) -> Option<&Operation<SIZE>> {
 		self.ops.get(id as usize)
-	}
-
-	pub fn poll_state(&mut self, id: u32) -> Option<&mut OperationPollState> {
-		self.submissions.get_mut(id as usize)
 	}
 
 	pub fn poll_states(&mut self) -> impl Iterator<Item = &mut OperationPollState> {

@@ -15,6 +15,7 @@ mod channel;
 mod completion;
 mod deps;
 mod select;
+mod cleanup_stream;
 
 pub(crate) mod inner;
 pub(crate) mod operation;

@@ -6,7 +6,7 @@ use std::{
 use futures::{StreamExt, TryStreamExt};
 use io_uring::cqueue;
 
-use crate::{Result, rt::operation::OperationPollState};
+use crate::{rt::{cleanup_stream::CleanupStream, operation::OperationPollState}, Result};
 
 use super::{
 	UringDataHandle,
@@ -35,6 +35,7 @@ pub(crate) enum WorkerMessage {
 		complete: RegisterResourceSender,
 	},
 	CloseResource(Resource),
+	FinishResource(Resource),
 	Stop,
 }
 
@@ -54,7 +55,7 @@ impl UringRuntimeWorker {
 		let data = handle.load().unwrap();
 
 		let uring_events = CqueueStream::<Fd>::new(data)?;
-		let mut combined = select_with_strategy(
+		let uring = select_with_strategy(
 			uring_events.map_ok(|x| WorkerMessage::Uring {
 				info: EventData::from(x.user_data()),
 				event: x,
@@ -68,48 +69,14 @@ impl UringRuntimeWorker {
 				}
 			},
 		);
+		let mut combined = select_with_strategy(uring, CleanupStream::new(), |x: &mut PollNext| x.toggle());
 
 		let mut resources = WorkerResourceSlab::new();
-		let mut closing: Vec<Resource> = Vec::new();
-
-		macro_rules! close {
-			($resource:expr) => {
-				let resource = $resource;
-				if let Some(mut val) = resources.remove(resource)
-					&& val.closing()
-					&& let Some(fd) = val.fd.take()
-				{
-					// uring already closed the fd
-					let _ = fd.into_raw_fd();
-				}
-			};
-		}
 
 		while let Some(evt) = combined.next().await.transpose()? {
 			match evt {
 				WorkerMessage::Uring { info, event } => {
-					if let Some(resource) = closing.iter_mut().find(|x| x.id == info.resource) {
-						// TODO this path still isn't proper and could lead to mem leaks if closing
-						// during a cancellation. i should probably just make another stream for
-						// this and poll the regular path. 
-						if let Some(state) = resource.ops.poll_state(info.id) {
-							debug_assert!(matches!(state, OperationPollState::Submitting));
-							*state = OperationPollState::Idle;
-
-							if !resource
-								.ops
-								.poll_states()
-								.any(|x| matches!(x, OperationPollState::Submitting))
-							{
-								// all ops finished
-								let id = resource.id;
-
-								close!(id);
-							}
-						} else {
-							panic!("dropped message while closing {info:?}");
-						}
-					} else if let Some(resource) = resources.get(info.resource) {
+					if let Some(resource) = resources.get(info.resource) {
 						if let Some(op) = resource.ops.get(info.id) {
 							// this drops any data that was needed for the op if it was cancelled
 							op.wake(event.result());
@@ -121,16 +88,16 @@ impl UringRuntimeWorker {
 					}
 				}
 				WorkerMessage::RegisterResource { ops, fd, complete } => {
-					let closing = Arc::new(AtomicBool::new(false));
+					let is_closing = Arc::new(AtomicBool::new(false));
 					let worker = WorkerResource {
 						ops: ops.clone(),
 						fd,
-						closing: closing.clone(),
+						closing: is_closing.clone(),
 					};
 
 					match resources.insert(worker) {
 						Ok(id) => {
-							let resource = Resource::new(id, ops, closing);
+							let resource = Resource::new(id, ops, is_closing);
 							let _ = complete.send(Ok(resource));
 						}
 						Err(err) => {
@@ -138,15 +105,22 @@ impl UringRuntimeWorker {
 						}
 					}
 				}
-				WorkerMessage::CloseResource(mut resource) => {
-					if resource
-						.ops
-						.poll_states()
-						.any(|x| matches!(x, OperationPollState::Submitting))
+				WorkerMessage::CloseResource(resource) => {
+					combined.get_mut().1.push(resource);
+				}
+				WorkerMessage::FinishResource(mut resource) => {
+					debug_assert!(
+						!resource
+							.ops
+							.poll_states()
+							.any(|x| matches!(x, OperationPollState::Submitting))
+					);
+
+					if let Some(mut val) = resources.remove(resource.id)
+						&& val.closing() && let Some(fd) = val.fd.take()
 					{
-						closing.push(resource);
-					} else {
-						close!(resource.id);
+						// uring already closed the fd
+						let _ = fd.into_raw_fd();
 					}
 				}
 				WorkerMessage::Stop => break,
