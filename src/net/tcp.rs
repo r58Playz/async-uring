@@ -1,7 +1,7 @@
 use std::{
 	os::fd::{AsRawFd, OwnedFd, RawFd},
 	pin::Pin,
-	task::{Context, Poll, Waker},
+	task::{Context, Poll},
 };
 
 use futures::{channel::oneshot, ready};
@@ -227,30 +227,24 @@ impl AsyncWrite for WriteHalf {
 
 impl Drop for ReadHalf {
 	fn drop(&mut self) {
-		self.resource.set_closing();
-		let _ = self.sender.send(WorkerMessage::CloseResource {
-			id: self.resource.id,
-			complete: Waker::noop().clone(),
-		});
+		let _ = self
+			.sender
+			.send(WorkerMessage::CloseResource(self.resource.dup()));
 	}
 }
 impl Drop for WriteHalf {
 	fn drop(&mut self) {
-		self.resource.set_closing();
-		let _ = self.sender.send(WorkerMessage::CloseResource {
-			id: self.resource.id,
-			complete: Waker::noop().clone(),
-		});
+		let _ = self
+			.sender
+			.send(WorkerMessage::CloseResource(self.resource.dup()));
 	}
 }
 impl Drop for TcpStream {
 	fn drop(&mut self) {
 		if !self.destructuring {
-			self.resource.set_closing();
-			let _ = self.sender.send(WorkerMessage::CloseResource {
-				id: self.resource.id,
-				complete: Waker::noop().clone(),
-			});
+			let _ = self
+				.sender
+				.send(WorkerMessage::CloseResource(self.resource.dup()));
 		}
 	}
 }

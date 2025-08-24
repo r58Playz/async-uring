@@ -1,6 +1,6 @@
 use std::{
 	pin::Pin,
-	task::{Context, Poll, Waker, ready},
+	task::{Context, Poll, ready},
 };
 
 use futures::{Stream, channel::oneshot};
@@ -61,10 +61,8 @@ impl Stream for NopStream {
 
 impl Drop for NopStream {
 	fn drop(&mut self) {
-		self.resource.set_closing();
-		let _ = self.sender.send(WorkerMessage::CloseResource {
-			id: self.resource.id,
-			complete: Waker::noop().clone(),
-		});
+		let _ = self
+			.sender
+			.send(WorkerMessage::CloseResource(self.resource.dup()));
 	}
 }

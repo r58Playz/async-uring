@@ -1,13 +1,12 @@
 use std::{
 	os::fd::{IntoRawFd, OwnedFd},
-	sync::{atomic::AtomicBool, Arc},
-	task::Waker,
+	sync::{Arc, atomic::AtomicBool},
 };
 
 use futures::{StreamExt, TryStreamExt};
 use io_uring::cqueue;
 
-use crate::Result;
+use crate::{Result, rt::operation::OperationPollState};
 
 use super::{
 	UringDataHandle,
@@ -35,10 +34,7 @@ pub(crate) enum WorkerMessage {
 		ops: Operations,
 		complete: RegisterResourceSender,
 	},
-	CloseResource {
-		id: u32,
-		complete: Waker,
-	},
+	CloseResource(Resource),
 	Stop,
 }
 
@@ -74,11 +70,46 @@ impl UringRuntimeWorker {
 		);
 
 		let mut resources = WorkerResourceSlab::new();
+		let mut closing: Vec<Resource> = Vec::new();
+
+		macro_rules! close {
+			($resource:expr) => {
+				let resource = $resource;
+				if let Some(mut val) = resources.remove(resource)
+					&& val.closing()
+					&& let Some(fd) = val.fd.take()
+				{
+					// uring already closed the fd
+					let _ = fd.into_raw_fd();
+				}
+			};
+		}
 
 		while let Some(evt) = combined.next().await.transpose()? {
 			match evt {
 				WorkerMessage::Uring { info, event } => {
-					if let Some(resource) = resources.get(info.resource) {
+					if let Some(resource) = closing.iter_mut().find(|x| x.id == info.resource) {
+						// TODO this path still isn't proper and could lead to mem leaks if closing
+						// during a cancellation. i should probably just make another stream for
+						// this and poll the regular path. 
+						if let Some(state) = resource.ops.poll_state(info.id) {
+							debug_assert!(matches!(state, OperationPollState::Submitting));
+							*state = OperationPollState::Idle;
+
+							if !resource
+								.ops
+								.poll_states()
+								.any(|x| matches!(x, OperationPollState::Submitting))
+							{
+								// all ops finished
+								let id = resource.id;
+
+								close!(id);
+							}
+						} else {
+							panic!("dropped message while closing {info:?}");
+						}
+					} else if let Some(resource) = resources.get(info.resource) {
 						if let Some(op) = resource.ops.get(info.id) {
 							// this drops any data that was needed for the op if it was cancelled
 							op.wake(event.result());
@@ -107,15 +138,16 @@ impl UringRuntimeWorker {
 						}
 					}
 				}
-				WorkerMessage::CloseResource { id, complete } => {
-					let val = resources.remove(id);
-					if let Some(mut val) = val
-						&& val.closing() && let Some(fd) = val.fd.take()
+				WorkerMessage::CloseResource(mut resource) => {
+					if resource
+						.ops
+						.poll_states()
+						.any(|x| matches!(x, OperationPollState::Submitting))
 					{
-						// uring already closed the fd
-						let _ = fd.into_raw_fd();
+						closing.push(resource);
+					} else {
+						close!(resource.id);
 					}
-					complete.wake();
 				}
 				WorkerMessage::Stop => break,
 			}

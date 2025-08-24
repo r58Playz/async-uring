@@ -64,6 +64,14 @@ impl Resource {
 		Self { id, ops, closing }
 	}
 
+	pub fn dup(&self) -> Self {
+		Self {
+			id: self.id,
+			ops: self.ops.dup(),
+			closing: self.closing.clone()
+		}
+	}
+
 	pub fn closing(&self) -> bool {
 		self.closing.load(Ordering::Acquire)
 	}

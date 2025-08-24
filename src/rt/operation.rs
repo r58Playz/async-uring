@@ -210,7 +210,7 @@ impl<const SIZE: usize> Operation<SIZE> {
 }
 
 #[derive(Copy, Clone)]
-enum OperationPollState {
+pub(crate) enum OperationPollState {
 	Idle,
 	Submitting,
 }
@@ -239,6 +239,13 @@ impl<const SIZE: usize> Operations<SIZE> {
 
 	pub fn new_from_size() -> Self {
 		Operations::new(std::array::from_fn::<_, SIZE, _>(|_| Operation::new()))
+	}
+
+	pub fn dup(&self) -> Self {
+		Self {
+			ops: self.ops.clone(),
+			submissions: self.submissions,
+		}
 	}
 
 	/// SAFETY: make sure entry will stay alive
@@ -320,6 +327,14 @@ impl<const SIZE: usize> Operations<SIZE> {
 
 	pub fn get(&self, id: u32) -> Option<&Operation<SIZE>> {
 		self.ops.get(id as usize)
+	}
+
+	pub fn poll_state(&mut self, id: u32) -> Option<&mut OperationPollState> {
+		self.submissions.get_mut(id as usize)
+	}
+
+	pub fn poll_states(&mut self) -> impl Iterator<Item = &mut OperationPollState> {
+		self.submissions.iter_mut()
 	}
 }
 
