@@ -59,7 +59,7 @@ pub(crate) enum OperationState {
 }
 
 impl OperationState {
-	const TAG_SIZE: u64 = 0b11;
+	const TAG_SIZE: u64 = 0b111;
 
 	pub fn cancel_data(self) -> Option<ManuallyDrop<Box<OperationCancelData>>> {
 		match self {
@@ -71,7 +71,7 @@ impl OperationState {
 
 impl From<u64> for OperationState {
 	fn from(value: u64) -> Self {
-		let (data, tag) = (value & !Self::TAG_SIZE, value & Self::TAG_SIZE);
+		let (tag, data) = (value & Self::TAG_SIZE, value & !Self::TAG_SIZE);
 		match tag {
 			1 => Self::Waiting,
 			// data is only ever an i32
@@ -79,12 +79,14 @@ impl From<u64> for OperationState {
 			2 => Self::Finished((data >> 3) as i32),
 			#[expect(clippy::cast_possible_truncation)]
 			// SAFETY: data is only ever an 8 byte aligned pointer
-			3 => Self::Cancelled(unsafe {
-				ManuallyDrop::new(Box::from_raw(
-					std::ptr::null_mut::<OperationCancelData>().with_addr(data as usize),
-				))
-			}),
-			_ => unreachable!("{value:08X}"),
+			3 => {
+				Self::Cancelled(unsafe {
+					ManuallyDrop::new(Box::from_raw(
+						std::ptr::null_mut::<OperationCancelData>().with_addr(data as usize),
+					))
+				})
+			}
+			tag => unreachable!("{value} {tag} {data}"),
 		}
 	}
 }
@@ -95,16 +97,16 @@ impl From<OperationState> for u64 {
 			// casted value is immediately casted back to i32
 			#[expect(clippy::cast_sign_loss)]
 			OperationState::Finished(val) => ((val as u64) << 3, 2u64),
-			OperationState::Cancelled(cleanup) => (
-				Box::into_raw(ManuallyDrop::into_inner(cleanup)).addr() as u64,
-				3u64,
-			),
+			OperationState::Cancelled(cleanup) => {
+				let addr = Box::into_raw(ManuallyDrop::into_inner(cleanup)).addr() as u64;
+				(addr, 3u64)
+			}
 		};
 
 		debug_assert_eq!(tag & !OperationState::TAG_SIZE, 0);
 		debug_assert_eq!(ptr & OperationState::TAG_SIZE, 0);
 
-		ptr | (tag & 0b111)
+		ptr | (tag & OperationState::TAG_SIZE)
 	}
 }
 

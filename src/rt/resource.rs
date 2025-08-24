@@ -39,7 +39,6 @@ impl WorkerResourceSlab {
 }
 
 pub(super) struct WorkerResource {
-	#[expect(dead_code)]
 	pub fd: Option<OwnedFd>,
 	pub ops: Operations,
 	pub closing: Arc<AtomicBool>,
