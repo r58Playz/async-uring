@@ -46,7 +46,7 @@ impl From<u64> for EventData {
 }
 
 #[derive(Debug)]
-#[repr(align(4))]
+#[repr(align(8))]
 pub(crate) struct OperationCancelData {
 	pub wake: bool,
 	pub buf: Vec<u8>,
