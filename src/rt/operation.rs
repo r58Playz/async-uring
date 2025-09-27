@@ -81,9 +81,7 @@ impl From<u64> for OperationState {
 			3 => {
 				// SAFETY: data is only ever an 8 byte aligned pointer
 				Self::Cancelled(unsafe {
-					ManuallyDrop::new(Box::from_raw(
-						std::ptr::null_mut::<OperationCancelData>().with_addr(data as usize),
-					))
+					ManuallyDrop::new(Box::from_raw((data as usize) as *mut OperationCancelData))
 				})
 			}
 			tag => unreachable!("{value} {tag} {data}"),
